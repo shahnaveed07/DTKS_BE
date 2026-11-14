@@ -20,6 +20,17 @@ function sanitizeFolder(folder = 'portfolio') {
 export function normalizeAssetKey(keyOrUrl) {
   if (!keyOrUrl || typeof keyOrUrl !== 'string') return '';
   let key = keyOrUrl.trim();
+  if (key.includes('%')) {
+    try {
+      key = decodeURIComponent(key);
+    } catch {
+      return '';
+    }
+  }
+  const fullUrlMatch = /^https?:\/\/[^/]+(\/api\/v1\/(?:uploads|assets)\/.+)$/i.exec(key);
+  if (fullUrlMatch) {
+    key = fullUrlMatch[1];
+  }
   for (const prefix of ['/api/v1/uploads/', '/api/v1/assets/']) {
     if (key.startsWith(prefix)) {
       key = key.slice(prefix.length);
@@ -27,7 +38,7 @@ export function normalizeAssetKey(keyOrUrl) {
     }
   }
   key = key.replace(/^\/+/, '');
-  if (!key || key.includes('..') || key.includes('\\')) {
+  if (!key || key.includes('..') || key.includes('\\') || key.includes('\0')) {
     return '';
   }
   return key;
@@ -85,8 +96,9 @@ export async function uploadImageToR2(request, env, defaultFolder = 'portfolio')
       err.code = 'MISSING_FILE';
       throw err;
     }
-    if (formData.get('folder')) {
-      folder = sanitizeFolder(formData.get('folder'));
+    const rawFolder = formData.get('folder') || formData.get('entityType');
+    if (rawFolder) {
+      folder = sanitizeFolder(rawFolder);
     }
     if (formData.get('replaceKey')) {
       replaceKey = normalizeAssetKey(String(formData.get('replaceKey')));
@@ -112,8 +124,9 @@ export async function uploadImageToR2(request, env, defaultFolder = 'portfolio')
       err.code = 'MISSING_FILE';
       throw err;
     }
-    if (body.folder) {
-      folder = sanitizeFolder(body.folder);
+    const rawFolder = body.folder || body.entityType;
+    if (rawFolder) {
+      folder = sanitizeFolder(rawFolder);
     }
     if (body.replaceKey || body.replace_key) {
       replaceKey = normalizeAssetKey(String(body.replaceKey || body.replace_key));
@@ -165,9 +178,12 @@ export async function uploadImageToR2(request, env, defaultFolder = 'portfolio')
     replacedKey = replaceKey;
   }
 
+  const publicPath = `/api/v1/uploads/${key}`;
   return {
+    id: key,
     key,
-    url: `/api/v1/uploads/${key}`,
+    url: publicPath,
+    publicUrl: publicPath,
     mimeType,
     sizeBytes: bytes.byteLength,
     replacedKey,

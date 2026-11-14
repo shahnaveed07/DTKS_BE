@@ -2,23 +2,55 @@
  * Strict CORS Configuration & Origin Allowlist
  */
 
-const DEFAULT_ALLOWED_ORIGINS = [
+const PRODUCTION_ALLOWED_ORIGINS = [
   'https://dreamtechkashmirsolutions.studio',
   'https://www.dreamtechkashmirsolutions.studio',
+];
+
+const DEV_ALLOWED_ORIGINS = [
   'http://localhost:3000',
   'http://127.0.0.1:3000',
   'http://localhost:5173',
+  'http://127.0.0.1:5173',
+  'http://localhost:8787',
 ];
+
+function isProductionEnv(env = {}) {
+  return (
+    String(env?.ENVIRONMENT || '').toLowerCase() === 'production' ||
+    (typeof process !== 'undefined' &&
+      String(process.env?.NODE_ENV || '').toLowerCase() === 'production' &&
+      !env?.ENVIRONMENT)
+  );
+}
+
+function isDevOrPreviewOrigin(origin = '') {
+  return (
+    /^https?:\/\/(localhost|127\.0\.0\.1|\[::1\])(?::\d+)?$/i.test(origin) ||
+    /^https:\/\/[a-z0-9-]+\.run\.app$/i.test(origin)
+  );
+}
 
 export function getAllowedOrigins(env = {}) {
   const custom = env.CORS_ALLOWED_ORIGINS
     ? String(env.CORS_ALLOWED_ORIGINS)
         .split(',')
-        .map((s) => s.trim())
+        .map((s) => s.trim().replace(/\/+$/, ''))
         .filter(Boolean)
     : [];
   const appUrl = env.APP_URL ? [String(env.APP_URL).trim().replace(/\/+$/, '')] : [];
-  return Array.from(new Set([...DEFAULT_ALLOWED_ORIGINS, ...custom, ...appUrl]));
+  const inProd = isProductionEnv(env);
+  const allowLocalInProd = String(env?.ALLOW_LOCAL_CORS || '').toLowerCase() === 'true';
+
+  const baseOrigins = inProd
+    ? PRODUCTION_ALLOWED_ORIGINS
+    : [...PRODUCTION_ALLOWED_ORIGINS, ...DEV_ALLOWED_ORIGINS];
+
+  const combined = Array.from(new Set([...baseOrigins, ...custom, ...appUrl]));
+  if (inProd && !allowLocalInProd) {
+    return combined.filter((origin) => !isDevOrPreviewOrigin(origin));
+  }
+  return combined;
 }
 
 export function isOriginAllowed(origin, env = {}) {
@@ -26,8 +58,10 @@ export function isOriginAllowed(origin, env = {}) {
   const normalized = String(origin).trim().replace(/\/+$/, '');
   const allowlist = getAllowedOrigins(env);
   if (allowlist.includes(normalized)) return true;
-  // Also allow *.run.app preview origins in AI Studio preview container
-  if (/^https:\/\/[a-z0-9-]+\.run\.app$/i.test(normalized)) return true;
+  // Allow *.run.app preview origins strictly outside production
+  if (!isProductionEnv(env) && /^https:\/\/[a-z0-9-]+\.run\.app$/i.test(normalized)) {
+    return true;
+  }
   return false;
 }
 
@@ -46,8 +80,6 @@ export function buildCorsHeaders(request, env = {}) {
   if (origin && isOriginAllowed(origin, env)) {
     headers['Access-Control-Allow-Origin'] = origin;
     headers['Access-Control-Allow-Credentials'] = 'true';
-  } else if (!origin) {
-    headers['Access-Control-Allow-Origin'] = 'https://dreamtechkashmirsolutions.studio';
   }
 
   return headers;

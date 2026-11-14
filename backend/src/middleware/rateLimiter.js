@@ -55,11 +55,19 @@ export const RATE_LIMIT_POLICIES = {
   },
 };
 
-export function getClientIp(request) {
+export function getClientIp(request, env = null) {
+  const cfIp = request.headers.get('CF-Connecting-IP')?.trim();
+  if (cfIp) return cfIp;
+
+  const isProd = String(env?.ENVIRONMENT || '').toLowerCase() === 'production';
+  if (isProd) {
+    // Never trust client-supplied X-Forwarded-For ahead of Cloudflare headers in production
+    return request.headers.get('X-Real-IP')?.trim() || '0.0.0.0';
+  }
+
   return (
-    request.headers.get('CF-Connecting-IP') ||
     request.headers.get('X-Forwarded-For')?.split(',')[0]?.trim() ||
-    request.headers.get('X-Real-IP') ||
+    request.headers.get('X-Real-IP')?.trim() ||
     '127.0.0.1'
   );
 }
@@ -103,7 +111,7 @@ export async function checkRateLimit(
   customKeySuffix = ''
 ) {
   const policy = RATE_LIMIT_POLICIES[policyName] || RATE_LIMIT_POLICIES.generalApi;
-  const ip = getClientIp(request);
+  const ip = getClientIp(request, env);
   const key = `${policyName}:${ip}${customKeySuffix ? `:${customKeySuffix}` : ''}`;
   const now = Date.now();
 
@@ -116,7 +124,7 @@ export async function checkRateLimit(
     }
   }
 
-  // 2. Distributed Cloudflare D1 Rate Limiting across Worker isolates
+  // 2. Distributed Cloudflare D1 Rate Limiting across Worker isolates (atomic single-statement upsert)
   if (env?.DB) {
     try {
       await ensureRateLimitsTable(env.DB);
@@ -130,35 +138,29 @@ export async function checkRateLimit(
           .catch(() => {});
       }
 
-      const existing = await env.DB.prepare(
-        'SELECT window_start, request_count, expires_at FROM rate_limits WHERE rate_key = ?'
+      const row = await env.DB.prepare(
+        `INSERT INTO rate_limits (rate_key, window_start, request_count, expires_at)
+         VALUES (?, ?, 1, ?)
+         ON CONFLICT(rate_key) DO UPDATE SET
+           window_start = CASE
+             WHEN rate_limits.expires_at <= excluded.window_start THEN excluded.window_start
+             ELSE rate_limits.window_start
+           END,
+           request_count = CASE
+             WHEN rate_limits.expires_at <= excluded.window_start THEN 1
+             ELSE rate_limits.request_count + 1
+           END,
+           expires_at = CASE
+             WHEN rate_limits.expires_at <= excluded.window_start THEN excluded.expires_at
+             ELSE rate_limits.expires_at
+           END
+         RETURNING window_start, request_count`
       )
-        .bind(key)
+        .bind(key, now, expiresAt)
         .first();
 
-      let windowStart = now;
-      let count = 1;
-
-      if (!existing || Number(existing.expires_at) <= now) {
-        await env.DB.prepare(
-          `INSERT INTO rate_limits (rate_key, window_start, request_count, expires_at)
-           VALUES (?, ?, 1, ?)
-           ON CONFLICT(rate_key) DO UPDATE SET
-             window_start = excluded.window_start,
-             request_count = 1,
-             expires_at = excluded.expires_at`
-        )
-          .bind(key, now, expiresAt)
-          .run();
-      } else {
-        windowStart = Number(existing.window_start);
-        count = Number(existing.request_count) + 1;
-        await env.DB.prepare(
-          'UPDATE rate_limits SET request_count = ? WHERE rate_key = ?'
-        )
-          .bind(count, key)
-          .run();
-      }
+      const windowStart = Number(row?.window_start ?? now);
+      const count = Number(row?.request_count ?? 1);
 
       const remaining = Math.max(0, policy.maxRequests - count);
       const resetSeconds = Math.max(1, Math.ceil((windowStart + policy.windowMs - now) / 1000));

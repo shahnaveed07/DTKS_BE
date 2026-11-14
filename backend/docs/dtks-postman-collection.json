@@ -465,6 +465,54 @@
           }
         },
         {
+          "name": "Client Resend Verification",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "url": "{{baseUrl}}/client/auth/resend-verification",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"email\": \"amina@example.com\"\n}"
+            }
+          }
+        },
+        {
+          "name": "Client Refresh Token",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "url": "{{baseUrl}}/client/auth/refresh",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"refreshToken\": \"{{clientRefreshToken}}\"\n}"
+            }
+          }
+        },
+        {
+          "name": "Client Forgot Password",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "url": "{{baseUrl}}/client/auth/forgot-password",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"email\": \"amina@example.com\"\n}"
+            }
+          }
+        },
+        {
+          "name": "Client Reset Password",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "url": "{{baseUrl}}/client/auth/reset-password",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"token\": \"<raw-reset-token>\",\n  \"newPassword\": \"NewClientPass#2026!\",\n  \"confirmPassword\": \"NewClientPass#2026!\"\n}"
+            }
+          }
+        },
+        {
           "name": "Client Orders (/client/orders)",
           "request": {
             "method": "GET",
@@ -486,6 +534,152 @@
             "method": "GET",
             "header": [{ "key": "Authorization", "value": "Bearer {{clientAccessToken}}" }],
             "url": "{{baseUrl}}/client/projects"
+          }
+        }
+      ]
+    },
+    {
+      "name": "10. System, Configs, Media, Team & Customers",
+      "item": [
+        {
+          "name": "Health Check (/health)",
+          "request": {
+            "method": "GET",
+            "url": "{{baseUrl}}/health"
+          }
+        },
+        {
+          "name": "Readiness Check (/ready)",
+          "request": {
+            "method": "GET",
+            "url": "{{baseUrl}}/ready"
+          }
+        },
+        {
+          "name": "Public Bootstrap (/bootstrap)",
+          "request": {
+            "method": "GET",
+            "url": "{{baseUrl}}/bootstrap"
+          }
+        },
+        {
+          "name": "Bulk Update Services (PUT /services)",
+          "request": {
+            "method": "PUT",
+            "header": [
+              { "key": "Authorization", "value": "Bearer {{accessToken}}" },
+              { "key": "Content-Type", "value": "application/json" }
+            ],
+            "url": "{{baseUrl}}/services",
+            "body": {
+              "mode": "raw",
+              "raw": "[\n  {\n    \"id\": \"svc-business\",\n    \"title\": \"Business & Corporate Websites\",\n    \"description\": \"Structured multi-page websites for companies and enterprises.\",\n    \"is_active\": true\n  }\n]"
+            }
+          }
+        },
+        {
+          "name": "Get Maintenance Plans Config",
+          "request": {
+            "method": "GET",
+            "url": "{{baseUrl}}/packages/config/maintenance"
+          }
+        },
+        {
+          "name": "Update Maintenance Plans Config (PUT)",
+          "request": {
+            "method": "PUT",
+            "header": [
+              { "key": "Authorization", "value": "Bearer {{accessToken}}" },
+              { "key": "Content-Type", "value": "application/json" }
+            ],
+            "url": "{{baseUrl}}/packages/config/maintenance",
+            "body": {
+              "mode": "raw",
+              "raw": "[\n  {\n    \"id\": \"maint-monthly\",\n    \"name\": \"Monthly\",\n    \"billingCycle\": \"Billed Monthly\",\n    \"price\": null,\n    \"currency\": \"INR\",\n    \"active\": true\n  }\n]"
+            }
+          }
+        },
+        {
+          "name": "Get Add-ons Config",
+          "request": {
+            "method": "GET",
+            "url": "{{baseUrl}}/packages/config/addons"
+          }
+        },
+        {
+          "name": "Update Add-ons Config (PUT)",
+          "request": {
+            "method": "PUT",
+            "header": [
+              { "key": "Authorization", "value": "Bearer {{accessToken}}" },
+              { "key": "Content-Type", "value": "application/json" }
+            ],
+            "url": "{{baseUrl}}/packages/config/addons",
+            "body": {
+              "mode": "raw",
+              "raw": "[\n  {\n    \"id\": \"addon-seo\",\n    \"name\": \"Advanced Technical SEO Setup\",\n    \"description\": \"Structured schema markup and Core Web Vitals optimization.\",\n    \"startingPrice\": null,\n    \"active\": true\n  }\n]"
+            }
+          }
+        },
+        {
+          "name": "Upload Image to R2 (/portfolio/upload)",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Authorization", "value": "Bearer {{accessToken}}" }],
+            "url": "{{baseUrl}}/portfolio/upload",
+            "body": {
+              "mode": "formdata",
+              "formdata": [
+                { "key": "file", "type": "file" },
+                { "key": "entityType", "value": "portfolio", "type": "text" }
+              ]
+            }
+          }
+        },
+        {
+          "name": "Delete Image from R2 (/portfolio/upload/:key)",
+          "request": {
+            "method": "DELETE",
+            "header": [{ "key": "Authorization", "value": "Bearer {{accessToken}}" }],
+            "url": "{{baseUrl}}/portfolio/upload?key=portfolio/example.png"
+          }
+        },
+        {
+          "name": "List Team Members (/team)",
+          "request": {
+            "method": "GET",
+            "url": "{{baseUrl}}/team"
+          }
+        },
+        {
+          "name": "List Testimonials (/testimonials)",
+          "request": {
+            "method": "GET",
+            "url": "{{baseUrl}}/testimonials"
+          }
+        },
+        {
+          "name": "List Customers (/customers)",
+          "request": {
+            "method": "GET",
+            "header": [{ "key": "Authorization", "value": "Bearer {{accessToken}}" }],
+            "url": "{{baseUrl}}/customers"
+          }
+        },
+        {
+          "name": "List Activity Logs (/admin/activity-logs)",
+          "request": {
+            "method": "GET",
+            "header": [{ "key": "Authorization", "value": "Bearer {{accessToken}}" }],
+            "url": "{{baseUrl}}/admin/activity-logs"
+          }
+        },
+        {
+          "name": "List Admin Notifications (/admin/notifications)",
+          "request": {
+            "method": "GET",
+            "header": [{ "key": "Authorization", "value": "Bearer {{accessToken}}" }],
+            "url": "{{baseUrl}}/admin/notifications"
           }
         }
       ]

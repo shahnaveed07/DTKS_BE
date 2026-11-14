@@ -25,15 +25,51 @@ const FORBIDDEN_SECRET_KEYS = [
   'privateKey',
 ];
 
+const FORBIDDEN_PROTOTYPE_KEYS = new Set(['__proto__', 'constructor', 'prototype']);
+
+function sanitizeSettingValue(val, depth = 0) {
+  if (depth > 4) return undefined;
+  if (typeof val === 'string') return sanitizeText(val, 4000);
+  if (typeof val === 'number' || typeof val === 'boolean' || val === null) return val;
+  if (Array.isArray(val)) {
+    return val
+      .slice(0, 100)
+      .map((item) => sanitizeSettingValue(item, depth + 1))
+      .filter((v) => v !== undefined);
+  }
+  if (typeof val === 'object') {
+    const out = {};
+    for (const [k, v] of Object.entries(val)) {
+      if (
+        FORBIDDEN_PROTOTYPE_KEYS.has(k) ||
+        FORBIDDEN_SECRET_KEYS.includes(k) ||
+        /secret|password|private_key|api_key/i.test(k)
+      ) {
+        continue;
+      }
+      const cleanVal = sanitizeSettingValue(v, depth + 1);
+      if (cleanVal !== undefined) out[k] = cleanVal;
+    }
+    return out;
+  }
+  return undefined;
+}
+
 function stripSensitiveSettings(settingsObj = {}) {
-  if (!settingsObj || typeof settingsObj !== 'object') return {};
-  const cleaned = { ...settingsObj };
-  for (const key of Object.keys(cleaned)) {
+  if (!settingsObj || typeof settingsObj !== 'object' || Array.isArray(settingsObj)) return {};
+  const cleaned = {};
+  for (const [key, val] of Object.entries(settingsObj)) {
     if (
+      FORBIDDEN_PROTOTYPE_KEYS.has(key) ||
       FORBIDDEN_SECRET_KEYS.includes(key) ||
       /secret|password|private_key|api_key/i.test(key)
     ) {
-      delete cleaned[key];
+      continue;
+    }
+    if (val && typeof val === 'object' && !Array.isArray(val)) {
+      cleaned[key] = stripSensitiveSettings(val);
+    } else {
+      cleaned[key] = val;
     }
   }
   return cleaned;
@@ -59,10 +95,11 @@ export async function updateSiteSettings(request, env, admin) {
     .bind('general')
     .first();
 
-  const currentSettings = safeJsonParse(existingRow?.setting_value, {});
+  const currentSettings = stripSensitiveSettings(safeJsonParse(existingRow?.setting_value, {}));
+  const sanitizedPatch = sanitizeSettingValue(stripSensitiveSettings(body)) || {};
   const nextSettings = stripSensitiveSettings({
     ...currentSettings,
-    ...body,
+    ...sanitizedPatch,
   });
 
   const now = new Date().toISOString();
@@ -113,8 +150,18 @@ async function writeSettingArray(env, key, arr, adminId) {
     .run();
 }
 
+function normalizeTeamMemberOutput(member) {
+  if (!member || typeof member !== 'object') return member;
+  const sortOrder = Number(member.sortOrder ?? member.order ?? 1);
+  return {
+    ...member,
+    sortOrder,
+    order: sortOrder,
+  };
+}
+
 export async function listTeamMembers(request, env) {
-  const team = await readSettingArray(env, 'team_members');
+  const team = (await readSettingArray(env, 'team_members')).map(normalizeTeamMemberOutput);
   team.sort((a, b) => Number(a.sortOrder || 1) - Number(b.sortOrder || 1));
   return successResponse({ team }, 'Team members fetched.');
 }
@@ -127,7 +174,7 @@ export async function createTeamMember(request, env, admin) {
   }
 
   const team = await readSettingArray(env, 'team_members');
-  const maxOrder = team.reduce((max, m) => Math.max(max, Number(m.sortOrder || 0)), 0);
+  const maxOrder = team.reduce((max, m) => Math.max(max, Number(m.sortOrder ?? m.order ?? 0)), 0);
   const now = new Date().toISOString();
   const id = generateRandomId('team');
   const initials =
@@ -137,6 +184,7 @@ export async function createTeamMember(request, env, admin) {
       .slice(0, 2)
       .map((w) => w[0]?.toUpperCase() || '')
       .join('');
+  const sortOrder = maxOrder + 1;
 
   const member = {
     id,
@@ -144,8 +192,12 @@ export async function createTeamMember(request, env, admin) {
     role: sanitizeText(body.role || 'Full-Stack Web Developer', 120),
     title: sanitizeText(body.title || '', 200),
     bio: sanitizeText(body.bio || '', 1500),
-    skills: Array.isArray(body.skills) ? body.skills : [],
-    technologies: Array.isArray(body.technologies) ? body.technologies : [],
+    skills: Array.isArray(body.skills)
+      ? body.skills.map((s) => sanitizeText(String(s || ''), 120)).filter(Boolean)
+      : [],
+    technologies: Array.isArray(body.technologies)
+      ? body.technologies.map((t) => sanitizeText(String(t || ''), 120)).filter(Boolean)
+      : [],
     avatarUrl: sanitizeText(body.avatarUrl || '', 2000),
     initials,
     linkedinUrl: sanitizeText(body.linkedinUrl || '', 500),
@@ -153,7 +205,8 @@ export async function createTeamMember(request, env, admin) {
     websiteUrl: sanitizeText(body.websiteUrl || '', 500),
     visible: body.visible !== false,
     isPlaceholder: Boolean(body.isPlaceholder),
-    sortOrder: maxOrder + 1,
+    sortOrder,
+    order: sortOrder,
     createdAt: now,
     updatedAt: now,
   };
@@ -181,11 +234,57 @@ export async function updateTeamMember(request, env, admin, id) {
   }
 
   const body = await parseJsonBody(request);
+  const existing = team[idx];
+  const nextFullName =
+    body.fullName !== undefined || body.full_name !== undefined
+      ? sanitizeText(body.fullName ?? body.full_name, 160)
+      : existing.fullName;
+
+  if (!nextFullName || nextFullName.length < 2) {
+    return errorResponse('Team member full name must be at least 2 characters.', 400, 'VALIDATION_ERROR');
+  }
+
+  const rawSort = body.sortOrder ?? body.order;
+  const sortOrder =
+    rawSort !== undefined && Number.isFinite(Number(rawSort))
+      ? Number(rawSort)
+      : Number(existing.sortOrder ?? existing.order ?? idx + 1);
+
   const now = new Date().toISOString();
   const updated = {
-    ...team[idx],
-    ...body,
     id,
+    fullName: nextFullName,
+    role: body.role !== undefined ? sanitizeText(body.role, 120) : existing.role || '',
+    title: body.title !== undefined ? sanitizeText(body.title, 200) : existing.title || '',
+    bio: body.bio !== undefined ? sanitizeText(body.bio, 1500) : existing.bio || '',
+    skills: Array.isArray(body.skills)
+      ? body.skills.map((s) => sanitizeText(String(s || ''), 120)).filter(Boolean)
+      : Array.isArray(existing.skills)
+      ? existing.skills
+      : [],
+    technologies: Array.isArray(body.technologies)
+      ? body.technologies.map((t) => sanitizeText(String(t || ''), 120)).filter(Boolean)
+      : Array.isArray(existing.technologies)
+      ? existing.technologies
+      : [],
+    avatarUrl:
+      body.avatarUrl !== undefined ? sanitizeText(body.avatarUrl, 2000) : existing.avatarUrl || '',
+    initials:
+      body.initials !== undefined ? sanitizeText(body.initials, 6) : existing.initials || '',
+    linkedinUrl:
+      body.linkedinUrl !== undefined
+        ? sanitizeText(body.linkedinUrl, 500)
+        : existing.linkedinUrl || '',
+    githubUrl:
+      body.githubUrl !== undefined ? sanitizeText(body.githubUrl, 500) : existing.githubUrl || '',
+    websiteUrl:
+      body.websiteUrl !== undefined ? sanitizeText(body.websiteUrl, 500) : existing.websiteUrl || '',
+    visible: body.visible !== undefined ? Boolean(body.visible) : existing.visible !== false,
+    isPlaceholder:
+      body.isPlaceholder !== undefined ? Boolean(body.isPlaceholder) : Boolean(existing.isPlaceholder),
+    sortOrder,
+    order: sortOrder,
+    createdAt: existing.createdAt || now,
     updatedAt: now,
   };
   team[idx] = updated;
@@ -229,7 +328,7 @@ export async function reorderTeamMember(request, env, admin, id) {
   const body = await parseJsonBody(request);
   const direction = body.direction === 'up' ? 'up' : 'down';
 
-  const team = await readSettingArray(env, 'team_members');
+  const team = (await readSettingArray(env, 'team_members')).map(normalizeTeamMemberOutput);
   team.sort((a, b) => Number(a.sortOrder || 1) - Number(b.sortOrder || 1));
   const idx = team.findIndex((m) => m.id === id);
   if (idx < 0) {
@@ -243,6 +342,7 @@ export async function reorderTeamMember(request, env, admin, id) {
     const now = new Date().toISOString();
     team.forEach((m, i) => {
       m.sortOrder = i + 1;
+      m.order = i + 1;
       m.updatedAt = now;
     });
     await writeSettingArray(env, 'team_members', team, admin.id);
@@ -356,7 +456,9 @@ export async function getPublicBootstrap(request, env) {
       services: (servicesRes.results || []).map(mapServiceRow),
       packages: (packagesRes.results || []).map(mapPackageRow),
       portfolio: (portfolioRes.results || []).map(mapPortfolioRow),
-      team: Array.isArray(settingsMap.team_members) ? settingsMap.team_members : [],
+      team: Array.isArray(settingsMap.team_members)
+        ? settingsMap.team_members.map(normalizeTeamMemberOutput)
+        : [],
       testimonials: Array.isArray(settingsMap.testimonials) ? settingsMap.testimonials : [],
       settings: stripSensitiveSettings(settingsMap.general || {}),
       addons: Array.isArray(settingsMap.addons) ? settingsMap.addons : [],

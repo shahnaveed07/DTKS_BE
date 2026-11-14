@@ -69,7 +69,7 @@ export async function dispatchEmail(
     detailMessage = 'Skipped dispatch to reserved example domain';
   } else {
     try {
-      const response = await fetchImpl('https://api.resend.com/emails', {
+      const fetchOptions = {
         method: 'POST',
         headers: {
           Authorization: `Bearer ${apiKey}`,
@@ -81,7 +81,11 @@ export async function dispatchEmail(
           subject,
           text: bodyText,
         }),
-      });
+      };
+      if (typeof AbortSignal !== 'undefined' && typeof AbortSignal.timeout === 'function') {
+        fetchOptions.signal = AbortSignal.timeout(10000);
+      }
+      const response = await fetchImpl('https://api.resend.com/emails', fetchOptions);
 
       if (response.ok) {
         const resJson = await response.json().catch(() => null);

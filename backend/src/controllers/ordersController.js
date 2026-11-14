@@ -128,7 +128,7 @@ export async function createOrder(request, env) {
   const now = new Date().toISOString();
 
   // 1. Upsert Customer in customers table without overwriting verified client account profiles from unauthenticated guest orders
-  const customer = await env.DB.prepare('SELECT id FROM customers WHERE lower(email) = lower(?)')
+  let customer = await env.DB.prepare('SELECT id FROM customers WHERE lower(email) = lower(?)')
     .bind(d.customerEmail)
     .first();
 
@@ -151,21 +151,33 @@ export async function createOrder(request, env) {
     }
   } else {
     customerId = generateRandomId('cust');
-    await env.DB.prepare(
-      `INSERT INTO customers (id, full_name, email, phone, city, business_name, created_at, updated_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
-    )
-      .bind(
-        customerId,
-        d.customerName,
-        d.customerEmail,
-        d.customerPhone,
-        d.customerCity,
-        d.businessName,
-        now,
-        now
+    try {
+      await env.DB.prepare(
+        `INSERT INTO customers (id, full_name, email, phone, city, business_name, created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
       )
-      .run();
+        .bind(
+          customerId,
+          d.customerName,
+          d.customerEmail,
+          d.customerPhone,
+          d.customerCity,
+          d.businessName,
+          now,
+          now
+        )
+        .run();
+    } catch (custErr) {
+      if (/UNIQUE constraint failed/i.test(String(custErr?.message || ''))) {
+        customer = await env.DB.prepare('SELECT id FROM customers WHERE lower(email) = lower(?)')
+          .bind(d.customerEmail)
+          .first();
+        if (!customer) throw custErr;
+        customerId = customer.id;
+      } else {
+        throw custErr;
+      }
+    }
   }
 
   // 2. Resolve service_id and package_id if valid foreign keys exist
@@ -204,88 +216,97 @@ export async function createOrder(request, env) {
     }
   }
 
-  // 3. Generate unique order_number and insert order with default status 'Pending'
+  // 3. Atomically insert order + order_items + initial order_status_history with collision retry
   const orderId = generateRandomId('ord');
-  const orderNumber = await generateNextOrderNumber(env);
   const initialStatus = 'Pending';
   const initialCustomerUpdate =
     'Your website development request has been received by DreamTech Kashmir Solutions and is queued for scope review.';
-
-  await env.DB.prepare(
-    `INSERT INTO orders
-     (id, order_number, customer_id, service_id, package_id, service_name, package_title, project_name, business_name,
-      customer_name, customer_email, customer_phone, customer_city, project_description, required_pages,
-      required_functionality, reference_websites, preferred_design_style, required_integrations, additional_instructions,
-      domain_preference, hosting_preference, hosting_notes, maintenance_interest, maintenance_plan_selected,
-      budget, expected_delivery_date, expected_timeline, urgency, status, quotation_amount, quotation_currency,
-      quotation_notes, customer_update, admin_notes, created_at, updated_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
-  )
-    .bind(
-      orderId,
-      orderNumber,
-      customerId,
-      resolvedServiceId,
-      resolvedPackageId,
-      resolvedServiceName,
-      resolvedPackageTitle,
-      d.projectName,
-      d.businessName,
-      d.customerName,
-      d.customerEmail,
-      d.customerPhone,
-      d.customerCity,
-      d.projectDescription,
-      d.requiredPages,
-      d.requiredFunctionality,
-      d.referenceWebsites,
-      d.preferredDesignStyle,
-      d.requiredIntegrations,
-      d.additionalInstructions,
-      d.domainPreference,
-      d.hostingPreference,
-      '',
-      d.maintenanceInterest,
-      d.maintenancePlanSelected,
-      d.budget,
-      d.expectedDeliveryDate,
-      d.expectedTimeline,
-      d.urgency,
-      initialStatus,
-      null,
-      'INR',
-      '',
-      initialCustomerUpdate,
-      '',
-      now,
-      now
-    )
-    .run();
-
-  // 4. Insert order_items record
   const orderItemId = generateRandomId('item');
-  await env.DB.prepare(
-    `INSERT INTO order_items (id, order_id, item_type, title, description, quantity, unit_price, currency, created_at)
-     VALUES (?, ?, 'package', ?, ?, 1, ?, 'INR', ?)`
-  )
-    .bind(
-      orderItemId,
-      orderId,
-      resolvedPackageTitle || resolvedServiceName,
-      d.projectDescription.slice(0, 300),
-      packagePrice,
-      now
-    )
-    .run();
-
-  // 5. Insert initial order_status_history record
   const historyId = generateRandomId('hist');
-  await env.DB.prepare(
-    `INSERT INTO order_status_history (id, order_id, previous_status, new_status, changed_by_admin_id, notes, created_at)
-     VALUES (?, ?, NULL, ?, NULL, 'Customer submitted website order request', ?)`
-  )
-    .bind(historyId, orderId, initialStatus, now)
-    .run();
+
+  let orderNumber = '';
+  for (let attempt = 0; attempt < 5; attempt++) {
+    const candidate = await generateNextOrderNumber(env);
+    const suffixOffset = attempt === 0 ? candidate : `${candidate.slice(0, -4)}${String(Number.parseInt(candidate.slice(-4), 10) + attempt).padStart(4, '0')}`;
+    orderNumber = attempt === 0 ? candidate : suffixOffset;
+
+    try {
+      await env.DB.batch([
+        env.DB.prepare(
+          `INSERT INTO orders
+           (id, order_number, customer_id, service_id, package_id, service_name, package_title, project_name, business_name,
+            customer_name, customer_email, customer_phone, customer_city, project_description, required_pages,
+            required_functionality, reference_websites, preferred_design_style, required_integrations, additional_instructions,
+            domain_preference, hosting_preference, hosting_notes, maintenance_interest, maintenance_plan_selected,
+            budget, expected_delivery_date, expected_timeline, urgency, status, quotation_amount, quotation_currency,
+            quotation_notes, customer_update, admin_notes, created_at, updated_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+        ).bind(
+          orderId,
+          orderNumber,
+          customerId,
+          resolvedServiceId,
+          resolvedPackageId,
+          resolvedServiceName,
+          resolvedPackageTitle,
+          d.projectName,
+          d.businessName,
+          d.customerName,
+          d.customerEmail,
+          d.customerPhone,
+          d.customerCity,
+          d.projectDescription,
+          d.requiredPages,
+          d.requiredFunctionality,
+          d.referenceWebsites,
+          d.preferredDesignStyle,
+          d.requiredIntegrations,
+          d.additionalInstructions,
+          d.domainPreference,
+          d.hostingPreference,
+          '',
+          d.maintenanceInterest,
+          d.maintenancePlanSelected,
+          d.budget,
+          d.expectedDeliveryDate,
+          d.expectedTimeline,
+          d.urgency,
+          initialStatus,
+          null,
+          'INR',
+          '',
+          initialCustomerUpdate,
+          '',
+          now,
+          now
+        ),
+        env.DB.prepare(
+          `INSERT INTO order_items (id, order_id, item_type, title, description, quantity, unit_price, currency, created_at)
+           VALUES (?, ?, 'package', ?, ?, 1, ?, 'INR', ?)`
+        ).bind(
+          orderItemId,
+          orderId,
+          resolvedPackageTitle || resolvedServiceName,
+          d.projectDescription.slice(0, 300),
+          packagePrice,
+          now
+        ),
+        env.DB.prepare(
+          `INSERT INTO order_status_history (id, order_id, previous_status, new_status, changed_by_admin_id, notes, created_at)
+           VALUES (?, ?, NULL, ?, NULL, 'Customer submitted website order request', ?)`
+        ).bind(historyId, orderId, initialStatus, now),
+      ]);
+      break;
+    } catch (insertErr) {
+      if (
+        attempt < 4 &&
+        /UNIQUE constraint failed:\s*orders\.order_number/i.test(String(insertErr?.message || ''))
+      ) {
+        continue;
+      }
+      throw insertErr;
+    }
+  }
 
   const createdRow = await env.DB.prepare('SELECT * FROM orders WHERE id = ?').bind(orderId).first();
   const publicOrder = mapOrderRow(createdRow, { includeInternal: false });

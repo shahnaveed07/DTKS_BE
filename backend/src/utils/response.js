@@ -41,7 +41,11 @@ export function errorResponse(message, status = 400, code = 'BAD_REQUEST', detai
   return jsonResponse(payload, status, extraHeaders);
 }
 
-export async function parseJsonBody(request, maxBytes = 1024 * 1024) {
+export async function parseJsonBody(
+  request,
+  maxBytes = 1024 * 1024,
+  { allowArray = false } = {}
+) {
   const contentLength = request.headers.get('content-length');
   if (contentLength && Number.parseInt(contentLength, 10) > maxBytes) {
     const err = new Error(`Request payload exceeds maximum size of ${Math.round(maxBytes / 1024)}KB.`);
@@ -59,13 +63,16 @@ export async function parseJsonBody(request, maxBytes = 1024 * 1024) {
   }
 
   if (!rawText.trim()) {
-    return {};
+    return allowArray ? [] : {};
   }
 
   try {
     const parsed = JSON.parse(rawText);
-    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
-      const err = new Error('JSON body must be an object.');
+    const isArray = Array.isArray(parsed);
+    if (!parsed || typeof parsed !== 'object' || (isArray && !allowArray)) {
+      const err = new Error(
+        allowArray ? 'JSON body must be an object or array.' : 'JSON body must be an object.'
+      );
       err.status = 400;
       err.code = 'INVALID_JSON_OBJECT';
       throw err;
@@ -98,6 +105,7 @@ export function sanitizeText(input, maxLength = 5000) {
     .replace(/<\/?script[^>]*>/gi, '')
     .replace(/<\/?(?:iframe|object|embed)[^>]*>/gi, '')
     .replace(/\bon\w+\s*=\s*(?:"[^"]*"|'[^']*'|[^\s>]+)/gi, '')
+    .replace(/(?:javascript|vbscript)\s*:/gi, '')
     .replace(/\s{2,}/g, ' ')
     .trim()
     .slice(0, maxLength);

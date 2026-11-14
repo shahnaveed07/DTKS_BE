@@ -276,3 +276,137 @@ export async function deleteService(request, env, admin, slugOrId) {
 
   return successResponse({ deletedId: serviceId }, 'Service deleted successfully.');
 }
+
+export async function bulkUpdateServices(request, env, admin) {
+  const body = await parseJsonBody(request, 1024 * 1024, { allowArray: true });
+  const rawList = Array.isArray(body)
+    ? body
+    : Array.isArray(body?.services)
+    ? body.services
+    : null;
+
+  if (!rawList || rawList.length === 0) {
+    return errorResponse(
+      'Services payload must be a non-empty array or an object containing a services array.',
+      400,
+      'VALIDATION_ERROR'
+    );
+  }
+
+  const now = new Date().toISOString();
+  const statements = [];
+
+  for (let i = 0; i < rawList.length; i++) {
+    const item = rawList[i];
+    if (!item || typeof item !== 'object' || Array.isArray(item)) {
+      return errorResponse(`Service entry at index ${i} must be an object.`, 400, 'VALIDATION_ERROR');
+    }
+    const normalized = {
+      ...item,
+      orderCategory: item.orderCategory ?? item.order_category ?? item.category,
+      shortDescription: item.shortDescription ?? item.short_description,
+      suitableFor: item.suitableFor ?? item.suitable_for,
+      iconName: item.iconName ?? item.icon_name,
+      isActive: item.isActive ?? item.is_active ?? item.active,
+      displayOrder: item.displayOrder ?? item.display_order ?? i + 1,
+    };
+    const validation = validateServiceInput(normalized, false);
+    if (!validation.isValid) {
+      return errorResponse(
+        `Service validation failed at index ${i}.`,
+        400,
+        'VALIDATION_ERROR',
+        validation.errors
+      );
+    }
+
+    const d = validation.data;
+    const rawId = typeof item.id === 'string' && item.id.trim() ? item.id.trim() : '';
+    let existing = null;
+    if (rawId) {
+      existing = await env.DB.prepare('SELECT id, slug FROM services WHERE id = ? LIMIT 1')
+        .bind(rawId)
+        .first();
+    }
+    if (!existing) {
+      existing = await env.DB.prepare('SELECT id, slug FROM services WHERE slug = ? LIMIT 1')
+        .bind(d.slug)
+        .first();
+    }
+
+    if (existing) {
+      statements.push(
+        env.DB.prepare(
+          `UPDATE services SET
+             title = ?, order_category = ?, short_description = ?, description = ?,
+             features = ?, technologies = ?, suitable_for = ?, image = ?, icon_name = ?,
+             price = ?, currency = ?, is_active = ?, display_order = ?, updated_at = ?
+           WHERE id = ?`
+        ).bind(
+          d.title,
+          d.orderCategory,
+          d.shortDescription,
+          d.description,
+          JSON.stringify(d.features),
+          JSON.stringify(d.technologies),
+          JSON.stringify(d.suitableFor),
+          d.image,
+          d.iconName,
+          d.price,
+          d.currency,
+          d.isActive ? 1 : 0,
+          d.displayOrder,
+          now,
+          existing.id
+        )
+      );
+    } else {
+      const id = rawId && rawId.startsWith('svc-') ? rawId : generateRandomId('svc');
+      statements.push(
+        env.DB.prepare(
+          `INSERT INTO services
+           (id, title, slug, order_category, short_description, description, features, technologies, suitable_for, image, icon_name, price, currency, is_active, display_order, created_at, updated_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+        ).bind(
+          id,
+          d.title,
+          d.slug,
+          d.orderCategory,
+          d.shortDescription,
+          d.description,
+          JSON.stringify(d.features),
+          JSON.stringify(d.technologies),
+          JSON.stringify(d.suitableFor),
+          d.image,
+          d.iconName,
+          d.price,
+          d.currency,
+          d.isActive ? 1 : 0,
+          d.displayOrder,
+          now,
+          now
+        )
+      );
+    }
+  }
+
+  if (statements.length > 0) {
+    await env.DB.batch(statements);
+  }
+
+  const allRes = await env.DB.prepare(
+    'SELECT * FROM services ORDER BY display_order ASC, created_at ASC'
+  ).all();
+  const services = (allRes.results || []).map(mapServiceRow);
+
+  await logAdminActivity(env, {
+    adminId: admin.id,
+    action: 'BULK_UPDATE_SERVICES',
+    entityType: 'Service',
+    entityId: 'catalog',
+    details: `Bulk updated ${services.length} services`,
+    request,
+  });
+
+  return successResponse({ services }, 'Services catalog updated successfully.');
+}

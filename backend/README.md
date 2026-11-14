@@ -55,12 +55,18 @@ backend/
 │   ├── 0003_admin_accounts_and_client_auth.sql          # Additive admin invite/revocation columns + 4 client/invite tables
 │   └── 0004_client_legal_acceptance_and_security_fixes.sql # Client legal acceptance persistence & composite security indexes
 ├── tests/
-│   ├── backend.test.js                # 19 core API security, RBAC, CRUD, R2 & fault-handling test suites
-│   └── auth_and_accounts.test.js      # 9 admin account management, client auth, linking & isolation test suites
+│   ├── backend.test.js                # 19 core API security, RBAC, CRUD, R2 & fault-handling tests
+│   ├── auth_and_accounts.test.js      # 14 admin account management, client auth, linking & isolation tests
+│   └── contract_and_security.test.js  # 7 frontend contract parity, CORS, atomic batch & OpenAPI parity tests
 ├── docs/
 │   ├── API_DOCUMENTATION.md           # Complete REST API reference & frontend integration guide
-│   ├── openapi.yaml                   # OpenAPI 3.0.3 specification
-│   └── dtks-postman-collection.json   # Postman Collection v2.1
+│   ├── openapi.yaml                   # OpenAPI 3.0.3 specification (100% route/method parity)
+│   ├── dtks-postman-collection.json   # Postman Collection v2.1
+│   ├── BACKEND_PRODUCTION_AUDIT.md    # Complete production-readiness audit findings & remediations
+│   ├── BACKEND_API_CONTRACT_MATRIX.md # Frontend DTKS <-> DTKS_BE API contract alignment matrix
+│   ├── BACKEND_SECURITY_REPORT.md     # Security architecture, auth, CORS, CSRF, rate-limit & R2 audit
+│   ├── DATABASE_MIGRATION_REPORT.md   # D1 migration & 17-table schema verification report
+│   └── BACKEND_TEST_REPORT.md         # Complete test & verification execution report
 ├── wrangler.toml                      # Cloudflare Workers, D1, and R2 configuration
 ├── .dev.vars.example                  # Example environment variables & secrets
 └── package.json                       # Backend scripts & metadata
@@ -82,14 +88,14 @@ backend/
    - Refresh tokens are stored as SHA-256 hashes in `refresh_sessions` / `customer_refresh_sessions`, rotated on every refresh, and immediately invalidated alongside `token_version` bumps on password change, reset, deactivation, or super-admin session revocation.
 4. **Role-Based Access Control (RBAC)**:
    - `super_admin`: Full workspace access plus creating/inviting admins, changing roles, activating/deactivating admin accounts, and revoking sessions (with last-active-`super_admin` demotion/deactivation protection).
-   - `admin`: Full workspace access (`DELETE`, `PUT /settings`, package configs, activity logs, notifications) plus read-only access to `/api/v1/admin/accounts`. Cannot create admins, alter roles/statuses, or revoke sessions.
-   - `editor`: Create and update services, packages, portfolio items, R2 uploads, orders, and contact inquiries. Restricted (`403 Forbidden`) from deleting records/R2 objects, modifying global settings, viewing audit logs, or accessing `/api/v1/admin/accounts`.
+   - `admin`: Full workspace access (`DELETE`, `PUT /settings`, `PUT /services`, package configs, activity logs, notifications) plus read-only access to `/api/v1/admin/accounts`. Cannot create admins, alter roles/statuses, or revoke sessions.
+   - `editor`: Create and update services, packages, portfolio items, R2 uploads, team members, testimonials, orders, and contact inquiries. Restricted (`403 Forbidden`) from deleting records/R2 objects, bulk catalog/config overwrites, modifying global settings, viewing audit logs, or accessing `/api/v1/admin/accounts`.
 5. **Safe Client Verification & Guest Customer Linking**:
    - Public client registration stores credentials in `customer_accounts` (isolated from `customers`), requires email verification via single-use SHA-256-hashed tokens before sign-in, and links to existing `customers` rows + unlinked historical `orders` only after email ownership is verified.
    - Unauthenticated guest `POST /api/v1/orders` preserves guest submissions while preventing overwrite of `customers` records linked to verified `customer_accounts`.
-6. **Distributed Rate Limiting & CORS/CSRF**:
-   - Backed by the Cloudflare D1 `rate_limits` table across Worker isolates (and optional Cloudflare native `RATE_LIMITER` binding), with dedicated policies for logins, token refreshes, client registration, email verification, password resets, and admin invite acceptance.
-   - CORS explicitly allows `Authorization` and `X-CSRF-Token` headers.
+6. **Atomic Distributed Rate Limiting & Production CORS/CSRF**:
+   - Atomic `INSERT ... ON CONFLICT DO UPDATE ... RETURNING` counters in the Cloudflare D1 `rate_limits` table across Worker isolates (and optional Cloudflare native `RATE_LIMITER` binding), trusting `CF-Connecting-IP` in production rather than spoofable `X-Forwarded-For` headers.
+   - Strict production CORS blocks `localhost`, `127.0.0.1`, `[::1]`, and `*.run.app` origins when `ENVIRONMENT=production` (unless `ALLOW_LOCAL_CORS=true` is explicitly enabled), and allows `Authorization` + `X-CSRF-Token`.
 
 ---
 
@@ -126,9 +132,11 @@ cp backend/.dev.vars.example backend/.dev.vars
 ```
 
 ### 4.2 Run Automated Backend Test Suite
-From the repository root:
+From either the repository root or `backend/` (40 automated tests across 3 suites):
 ```bash
 npm test
+# or
+cd backend && npm test
 ```
 
 ### 4.3 Run with Cloudflare Wrangler

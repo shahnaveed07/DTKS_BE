@@ -10,7 +10,7 @@ export async function logAdminActivity(
 ) {
   try {
     const id = generateRandomId('act');
-    const ipAddress = request ? getClientIp(request) : '';
+    const ipAddress = request ? getClientIp(request, env) : '';
     const timestamp = new Date().toISOString();
 
     await env.DB.prepare(

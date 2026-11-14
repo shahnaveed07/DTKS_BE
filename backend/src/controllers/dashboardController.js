@@ -177,7 +177,9 @@ export async function listCustomers(request, env) {
        COUNT(o.id) AS orderCount,
        COALESCE(SUM(o.quotation_amount), 0) AS totalQuotedAmount
      FROM customers c
-     LEFT JOIN orders o ON o.customer_id = c.id OR lower(o.customer_email) = lower(c.email)
+     LEFT JOIN orders o
+       ON o.customer_id = c.id
+       OR (o.customer_id IS NULL AND lower(o.customer_email) = lower(c.email))
      GROUP BY c.id
      ORDER BY c.created_at DESC`
   ).all();
@@ -209,7 +211,10 @@ export async function getCustomerById(request, env, id) {
   }
 
   const ordersResult = await env.DB.prepare(
-    'SELECT * FROM orders WHERE customer_id = ? OR lower(customer_email) = lower(?) ORDER BY created_at DESC'
+    `SELECT * FROM orders
+     WHERE customer_id = ?
+        OR (customer_id IS NULL AND lower(customer_email) = lower(?))
+     ORDER BY created_at DESC`
   )
     .bind(customer.id, customer.email)
     .all();

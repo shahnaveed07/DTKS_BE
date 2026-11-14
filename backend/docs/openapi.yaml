@@ -127,7 +127,21 @@ components:
         budget: { type: string }
         status:
           type: string
-          enum: [Pending, Reviewed, Approved, InProgress, Completed, Rejected, Cancelled]
+          enum:
+            - Pending
+            - New Request
+            - Reviewed
+            - Under Review
+            - Requirements Clarification
+            - Quotation Sent
+            - Awaiting Customer Approval
+            - Approved
+            - InProgress
+            - In Progress
+            - Under Testing
+            - Completed
+            - Rejected
+            - Cancelled
         admin_notes: { type: string }
         created_at: { type: string, format: date-time }
         updated_at: { type: string, format: date-time }
@@ -142,7 +156,7 @@ components:
         message: { type: string }
         status:
           type: string
-          enum: [New, In Review, Replied, Archived]
+          enum: [New, Read, In Review, Replied, Archived]
         created_at: { type: string, format: date-time }
 
     AdminAccount:
@@ -158,6 +172,10 @@ components:
         invitePending: { type: boolean }
         invitedByAdminId: { type: string, nullable: true }
         inviteAcceptedAt: { type: string, format: date-time, nullable: true }
+        inviteExpiresAt: { type: string, format: date-time, nullable: true }
+        inviteExpired: { type: boolean }
+        activeSessions: { type: integer, example: 1 }
+        activeSessionCount: { type: integer, example: 1 }
         deactivatedAt: { type: string, format: date-time, nullable: true }
         lastLoginAt: { type: string, format: date-time, nullable: true }
         createdAt: { type: string, format: date-time }
@@ -295,6 +313,23 @@ paths:
           description: Profile updated
         '400':
           description: Validation error or forbidden field modification attempted
+    put:
+      summary: Update Current Admin Name (PUT alias)
+      tags: [Authentication]
+      security:
+        - BearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [name]
+              properties:
+                name: { type: string, minLength: 2 }
+      responses:
+        '200':
+          description: Profile updated
   /auth/change-password:
     post:
       summary: Change Admin Password
@@ -347,7 +382,7 @@ paths:
           schema: { type: string, enum: [super_admin, admin, editor, all] }
         - name: status
           in: query
-          schema: { type: string, enum: [all, active, inactive] }
+          schema: { type: string, enum: [all, active, inactive, pending, expired] }
         - name: isActive
           in: query
           schema: { type: boolean }
@@ -430,6 +465,19 @@ paths:
           description: Admin account updated
         '409':
           description: Cannot demote last active super_admin
+    put:
+      summary: Update Admin Name or Role (PUT alias, super_admin only)
+      tags: [Admin Accounts]
+      security:
+        - BearerAuth: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: { type: string }
+      responses:
+        '200':
+          description: Admin account updated
   /admin/accounts/{id}/resend-invite:
     post:
       summary: Resend Invitation Email for Pending Admin (super_admin only)
@@ -471,6 +519,19 @@ paths:
           description: Admin status updated
         '409':
           description: Cannot deactivate last active super_admin
+    put:
+      summary: Activate or Deactivate Admin Account (PUT alias, super_admin only)
+      tags: [Admin Accounts]
+      security:
+        - BearerAuth: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: { type: string }
+      responses:
+        '200':
+          description: Admin status updated
   /admin/accounts/{id}/sessions:
     delete:
       summary: Revoke All Active Sessions for Admin Account (super_admin only)
@@ -638,6 +699,14 @@ paths:
       responses:
         '200':
           description: Profile updated
+    put:
+      summary: Update Current Client Profile (PUT alias)
+      tags: [Client Authentication]
+      security:
+        - ClientBearerAuth: []
+      responses:
+        '200':
+          description: Profile updated
   /client/auth/change-password:
     post:
       summary: Change Client Password
@@ -781,6 +850,29 @@ paths:
       responses:
         '201':
           description: Service created
+    put:
+      summary: Bulk Sync Website Services Catalog (super_admin / admin)
+      tags: [Services]
+      security:
+        - BearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              oneOf:
+                - type: array
+                  items: { $ref: '#/components/schemas/Service' }
+                - type: object
+                  properties:
+                    services:
+                      type: array
+                      items: { $ref: '#/components/schemas/Service' }
+      responses:
+        '200':
+          description: Services catalog synced
+        '403':
+          description: Forbidden for editor role
   /services/{slugOrId}:
     get:
       summary: Get Service by Slug or ID
@@ -808,8 +900,21 @@ paths:
       responses:
         '200':
           description: Service updated
+    patch:
+      summary: Partially Update Service (Admin)
+      tags: [Services]
+      security:
+        - BearerAuth: []
+      parameters:
+        - name: slugOrId
+          in: path
+          required: true
+          schema: { type: string }
+      responses:
+        '200':
+          description: Service updated
     delete:
-      summary: Delete Service (Admin)
+      summary: Delete Service (super_admin / admin)
       tags: [Services]
       security:
         - BearerAuth: []
@@ -840,6 +945,66 @@ paths:
       responses:
         '201':
           description: Package created
+  /packages/config/maintenance:
+    get:
+      summary: Get Maintenance Plans Configuration (Public)
+      tags: [Packages]
+      responses:
+        '200':
+          description: Maintenance plans configuration
+    put:
+      summary: Update Maintenance Plans Configuration (super_admin / admin)
+      tags: [Packages]
+      security:
+        - BearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              oneOf:
+                - type: array
+                  items: { type: object }
+                - type: object
+                  properties:
+                    maintenancePlans:
+                      type: array
+                      items: { type: object }
+      responses:
+        '200':
+          description: Maintenance plans updated
+        '403':
+          description: Forbidden for editor role
+  /packages/config/addons:
+    get:
+      summary: Get Optional Add-ons Configuration (Public)
+      tags: [Packages]
+      responses:
+        '200':
+          description: Add-ons configuration
+    put:
+      summary: Update Optional Add-ons Configuration (super_admin / admin)
+      tags: [Packages]
+      security:
+        - BearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              oneOf:
+                - type: array
+                  items: { type: object }
+                - type: object
+                  properties:
+                    addons:
+                      type: array
+                      items: { type: object }
+      responses:
+        '200':
+          description: Add-ons updated
+        '403':
+          description: Forbidden for editor role
   /packages/{id}:
     get:
       summary: Get Package by ID
@@ -865,8 +1030,21 @@ paths:
       responses:
         '200':
           description: Package updated
+    patch:
+      summary: Partially Update Package (Admin)
+      tags: [Packages]
+      security:
+        - BearerAuth: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: { type: string }
+      responses:
+        '200':
+          description: Package updated
     delete:
-      summary: Delete Package (Admin)
+      summary: Delete Package (super_admin / admin)
       tags: [Packages]
       security:
         - BearerAuth: []
@@ -928,8 +1106,21 @@ paths:
       responses:
         '200':
           description: Portfolio item updated
+    patch:
+      summary: Partially Update Portfolio Project (Admin)
+      tags: [Portfolio]
+      security:
+        - BearerAuth: []
+      parameters:
+        - name: slugOrId
+          in: path
+          required: true
+          schema: { type: string }
+      responses:
+        '200':
+          description: Portfolio item updated
     delete:
-      summary: Delete Portfolio Project & Associated R2 Assets (Admin)
+      summary: Delete Portfolio Project & Associated R2 Assets (super_admin / admin)
       tags: [Portfolio]
       security:
         - BearerAuth: []
@@ -943,7 +1134,7 @@ paths:
           description: Portfolio item deleted
   /portfolio/upload:
     post:
-      summary: Upload Portfolio Image to Cloudflare R2 (Admin)
+      summary: Upload Image to Cloudflare R2 (Admin)
       tags: [Portfolio]
       security:
         - BearerAuth: []
@@ -961,19 +1152,74 @@ paths:
                 folder:
                   type: string
                   example: portfolio
+                entityType:
+                  type: string
+                  example: team
                 replaceKey:
                   type: string
       responses:
         '201':
           description: Image uploaded to R2
     delete:
-      summary: Delete Portfolio Image from Cloudflare R2 (Admin)
+      summary: Delete Image from Cloudflare R2 by Query or Body Key/URL (super_admin / admin)
       tags: [Portfolio]
       security:
         - BearerAuth: []
+      parameters:
+        - name: key
+          in: query
+          schema: { type: string }
       responses:
         '200':
           description: Image deleted from R2
+  /portfolio/upload/{key}:
+    delete:
+      summary: Delete Image from Cloudflare R2 by Path Key or Encoded URL (super_admin / admin)
+      tags: [Portfolio]
+      security:
+        - BearerAuth: []
+      parameters:
+        - name: key
+          in: path
+          required: true
+          schema: { type: string }
+      responses:
+        '200':
+          description: Image deleted from R2
+        '400':
+          description: Invalid R2 asset key encoding
+  /uploads/{key}:
+    get:
+      summary: Serve Uploaded Asset from Cloudflare R2
+      tags: [Media]
+      parameters:
+        - name: key
+          in: path
+          required: true
+          schema: { type: string }
+      responses:
+        '200':
+          description: Binary image stream with security headers
+        '400':
+          description: Invalid asset key
+        '404':
+          description: Asset not found
+  /assets/{key}:
+    get:
+      summary: Serve Uploaded Asset from Cloudflare R2 (/assets alias)
+      tags: [Media]
+      parameters:
+        - name: key
+          in: path
+          required: true
+          schema: { type: string }
+      responses:
+        '200':
+          description: Binary image stream with security headers
+        '400':
+          description: Invalid asset key
+        '404':
+          description: Asset not found
   /orders:
     post:
       summary: Submit Website Order Request (Public)
@@ -1032,8 +1278,21 @@ paths:
       responses:
         '200':
           description: Order updated
+    put:
+      summary: Update Order Status, Notes & Quotation (PUT alias, Admin)
+      tags: [Orders]
+      security:
+        - BearerAuth: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: { type: string }
+      responses:
+        '200':
+          description: Order updated
     delete:
-      summary: Delete Order (Admin)
+      summary: Delete Order (super_admin / admin)
       tags: [Orders]
       security:
         - BearerAuth: []
@@ -1048,6 +1307,19 @@ paths:
   /orders/{id}/status:
     patch:
       summary: Update Order Status & Record Status History (Admin)
+      tags: [Orders]
+      security:
+        - BearerAuth: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: { type: string }
+      responses:
+        '200':
+          description: Order status updated
+    put:
+      summary: Update Order Status & Record Status History (PUT alias, Admin)
       tags: [Orders]
       security:
         - BearerAuth: []
@@ -1108,8 +1380,21 @@ paths:
       responses:
         '200':
           description: Contact message updated
+    put:
+      summary: Update Contact Message Status & Admin Notes (PUT alias, Admin)
+      tags: [Contact]
+      security:
+        - BearerAuth: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: { type: string }
+      responses:
+        '200':
+          description: Contact message updated
     delete:
-      summary: Delete Contact Message (Admin)
+      summary: Delete Contact Message (super_admin / admin)
       tags: [Contact]
       security:
         - BearerAuth: []
@@ -1157,6 +1442,55 @@ paths:
       responses:
         '200':
           description: Order analytics
+  /customers:
+    get:
+      summary: List Customers with Aggregated Order Counts (Admin)
+      tags: [Customers]
+      security:
+        - BearerAuth: []
+      responses:
+        '200':
+          description: Customers list
+  /customers/{id}:
+    get:
+      summary: Get Customer Details & Orders (Admin)
+      tags: [Customers]
+      security:
+        - BearerAuth: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: { type: string }
+      responses:
+        '200':
+          description: Customer details and associated orders
+  /admin/activity-logs:
+    get:
+      summary: List Admin Activity & Email Delivery Audit Logs (super_admin / admin only)
+      tags: [Dashboard]
+      security:
+        - BearerAuth: []
+      parameters:
+        - name: limit
+          in: query
+          schema: { type: integer, default: 50 }
+      responses:
+        '200':
+          description: Activity log entries
+        '403':
+          description: Forbidden for editor role
+  /admin/notifications:
+    get:
+      summary: List Recent Admin Notifications Derived from Live Activity (super_admin / admin only)
+      tags: [Dashboard]
+      security:
+        - BearerAuth: []
+      responses:
+        '200':
+          description: Notifications feed
+        '403':
+          description: Forbidden for editor role
   /settings:
     get:
       summary: Get Public Site Settings
@@ -1174,26 +1508,133 @@ paths:
           description: Site settings updated
         '403':
           description: Forbidden for editor role
+    patch:
+      summary: Partially Update Site Settings (super_admin / admin only)
+      tags: [Settings]
+      security:
+        - BearerAuth: []
+      responses:
+        '200':
+          description: Site settings updated
+        '403':
+          description: Forbidden for editor role
+  /team:
+    get:
+      summary: List Public or All Team Members
+      tags: [Team]
+      responses:
+        '200':
+          description: Team members ordered by sortOrder
+    post:
+      summary: Create Team Member (Admin)
+      tags: [Team]
+      security:
+        - BearerAuth: []
+      responses:
+        '201':
+          description: Team member created
+  /team/{id}/reorder:
+    post:
+      summary: Reorder Team Member Display Position (Admin)
+      tags: [Team]
+      security:
+        - BearerAuth: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: { type: string }
+      responses:
+        '200':
+          description: Team order updated
+    patch:
+      summary: Reorder Team Member Display Position (PATCH alias, Admin)
+      tags: [Team]
+      security:
+        - BearerAuth: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: { type: string }
+      responses:
+        '200':
+          description: Team order updated
+  /team/{id}:
+    put:
+      summary: Update Team Member (Admin)
+      tags: [Team]
+      security:
+        - BearerAuth: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: { type: string }
+      responses:
+        '200':
+          description: Team member updated
+    patch:
+      summary: Partially Update Team Member (Admin)
+      tags: [Team]
+      security:
+        - BearerAuth: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: { type: string }
+      responses:
+        '200':
+          description: Team member updated
+    delete:
+      summary: Delete Team Member (super_admin / admin)
+      tags: [Team]
+      security:
+        - BearerAuth: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: { type: string }
+      responses:
+        '200':
+          description: Team member deleted
+  /testimonials:
+    get:
+      summary: List Published Testimonials
+      tags: [Testimonials]
+      responses:
+        '200':
+          description: Testimonials list
+    post:
+      summary: Create Testimonial (Admin)
+      tags: [Testimonials]
+      security:
+        - BearerAuth: []
+      responses:
+        '201':
+          description: Testimonial created
+  /testimonials/{id}:
+    delete:
+      summary: Delete Testimonial (super_admin / admin)
+      tags: [Testimonials]
+      security:
+        - BearerAuth: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: { type: string }
+      responses:
+        '200':
+          description: Testimonial deleted
   /bootstrap:
     get:
-      summary: Get Combined Public Website Bootstrap Payload (Services, Packages, Portfolio, Settings)
+      summary: Get Combined Public Website Bootstrap Payload (Services, Packages, Portfolio, Settings, Team, Testimonials)
       tags: [System]
       responses:
         '200':
           description: Combined public catalog and settings payload for the DTKS frontend
-  /admin/activity-logs:
-    get:
-      summary: List Admin Activity & Email Delivery Audit Logs (super_admin / admin only)
-      tags: [Dashboard]
-      security:
-        - BearerAuth: []
-      parameters:
-        - name: limit
-          in: query
-          schema: { type: integer, default: 50 }
-      responses:
-        '200':
-          description: Activity log entries
-        '403':
-          description: Forbidden for editor role
+
 

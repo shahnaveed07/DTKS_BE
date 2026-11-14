@@ -673,7 +673,9 @@ function isValidBootstrapPassword(password, isProduction = false) {
   const trimmed = password.trim();
   const minLength = isProduction ? 12 : 8;
   if (trimmed.length < minLength || trimmed.length > 128) return false;
-  if (/replace-with|changeme|password123/i.test(trimmed)) return false;
+  if (/replace-with|changeme|password123|your-strong|admin123|12345678|<your/i.test(trimmed)) {
+    return false;
+  }
   return true;
 }
 

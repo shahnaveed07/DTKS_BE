@@ -58,7 +58,9 @@ export async function listAdminAccounts(request, env) {
   const url = new URL(request.url);
   const role = (url.searchParams.get('role') || '').trim().toLowerCase();
   const rawStatus = (url.searchParams.get('status') || '').trim().toLowerCase();
-  const status = ['all', 'active', 'inactive'].includes(rawStatus) ? rawStatus : '';
+  const status = ['all', 'active', 'inactive', 'pending', 'expired'].includes(rawStatus)
+    ? rawStatus
+    : '';
   const isActiveParam = url.searchParams.get('is_active') ?? url.searchParams.get('isActive');
   const search = (url.searchParams.get('search') || url.searchParams.get('q') || '').trim();
 
@@ -72,6 +74,7 @@ export async function listAdminAccounts(request, env) {
       : DEFAULT_ADMIN_ACCOUNTS_LIMIT;
   const offset = (page - 1) * limit;
 
+  const nowIso = new Date().toISOString();
   const conditions = [];
   const params = [];
 
@@ -84,6 +87,19 @@ export async function listAdminAccounts(request, env) {
     conditions.push('a.is_active = 1');
   } else if (status === 'inactive') {
     conditions.push('a.is_active = 0');
+  } else if (status === 'pending') {
+    conditions.push('a.password_hash = ?');
+    params.push(PENDING_INVITE_PASSWORD_SENTINEL);
+  } else if (status === 'expired') {
+    conditions.push(
+      `a.password_hash = ? AND COALESCE(
+        (SELECT ai.expires_at FROM admin_invitations ai
+         WHERE ai.admin_id = a.id AND ai.used_at IS NULL
+         ORDER BY ai.created_at DESC LIMIT 1),
+        ''
+      ) <= ?`
+    );
+    params.push(PENDING_INVITE_PASSWORD_SENTINEL, nowIso);
   } else if (isActiveParam === 'true' || isActiveParam === '1') {
     conditions.push('a.is_active = 1');
   } else if (isActiveParam === 'false' || isActiveParam === '0') {
@@ -104,13 +120,15 @@ export async function listAdminAccounts(request, env) {
   const total = Number(countRow?.total || 0);
   const totalPages = Math.max(1, Math.ceil(total / limit));
 
-  const nowIso = new Date().toISOString();
   const sql = `
     SELECT a.id, a.name, a.email, a.password_hash, a.role, a.is_active,
            a.invited_by_admin_id, a.invite_accepted_at, a.deactivated_at,
            a.last_login_at, a.created_at, a.updated_at,
            (SELECT COUNT(*) FROM refresh_sessions rs
-            WHERE rs.admin_id = a.id AND rs.revoked_at IS NULL AND rs.expires_at > ?) AS activeSessionCount
+            WHERE rs.admin_id = a.id AND rs.revoked_at IS NULL AND rs.expires_at > ?) AS activeSessionCount,
+           (SELECT ai.expires_at FROM admin_invitations ai
+            WHERE ai.admin_id = a.id AND ai.used_at IS NULL AND ai.revoked_at IS NULL
+            ORDER BY ai.created_at DESC LIMIT 1) AS latestInviteExpiresAt
     FROM admins a${whereClause}
     ORDER BY a.created_at ASC
     LIMIT ? OFFSET ?`;
@@ -119,11 +137,26 @@ export async function listAdminAccounts(request, env) {
     .bind(nowIso, ...params, limit, offset)
     .all();
 
-  const accounts = (result.results || []).map((row) =>
-    mapAdminAccountRow(row, {
-      activeSessionCount: Number(row.activeSessionCount || 0),
-    })
-  );
+  const nowMs = Date.now();
+  const accounts = (result.results || []).map((row) => {
+    const activeSessions = Number(row.activeSessionCount || 0);
+    const invitePending = row.password_hash === PENDING_INVITE_PASSWORD_SENTINEL;
+    const inviteExpiresAt = invitePending ? row.latestInviteExpiresAt || null : null;
+    const inviteExpired = Boolean(
+      invitePending &&
+        inviteExpiresAt &&
+        !Number.isNaN(new Date(inviteExpiresAt).getTime()) &&
+        new Date(inviteExpiresAt).getTime() <= nowMs
+    );
+    return mapAdminAccountRow(row, {
+      activeSessionCount: activeSessions,
+      activeSessions,
+      inviteExpiresAt,
+      invite_expires_at: inviteExpiresAt,
+      inviteExpired,
+      invite_expired: inviteExpired,
+    });
+  });
 
   return successResponse(
     {
@@ -185,10 +218,25 @@ export async function getAdminAccountById(request, env, id) {
     createdAt: s.created_at,
   }));
 
+  const activeCount = sessions.filter((s) => s.isActive).length;
+  const invitePending = row.password_hash === PENDING_INVITE_PASSWORD_SENTINEL;
+  const inviteExpiresAt = invitePending && latestInvite ? latestInvite.expires_at : null;
+  const inviteExpired = Boolean(
+    invitePending &&
+      inviteExpiresAt &&
+      !Number.isNaN(new Date(inviteExpiresAt).getTime()) &&
+      new Date(inviteExpiresAt).getTime() <= Date.now()
+  );
+
   return successResponse(
     {
       account: mapAdminAccountRow(row, {
-        activeSessionCount: sessions.filter((s) => s.isActive).length,
+        activeSessionCount: activeCount,
+        activeSessions: activeCount,
+        inviteExpiresAt,
+        invite_expires_at: inviteExpiresAt,
+        inviteExpired,
+        invite_expired: inviteExpired,
         sessions,
         latestInvitation: latestInvite
           ? {
@@ -311,17 +359,26 @@ export async function createAdminAccount(request, env, currentAdmin) {
       {
         adminCreated: true,
         invitationEmailSent: false,
+        inviteEmailSent: false,
         deliveryStatus: emailResult.status,
-        account: mapAdminAccountRow(createdRow),
+        account: mapAdminAccountRow(createdRow, {
+          inviteExpiresAt,
+          inviteExpired: false,
+        }),
       }
     );
   }
 
   return successResponse(
     {
-      account: mapAdminAccountRow(createdRow),
+      account: mapAdminAccountRow(createdRow, {
+        inviteExpiresAt,
+        inviteExpired: false,
+      }),
       invitationEmailSent: true,
+      inviteEmailSent: true,
       invitationExpiresAt: inviteExpiresAt,
+      inviteExpiresAt,
     },
     'Administrator account created and invitation email dispatched.',
     201
@@ -411,6 +468,7 @@ export async function resendAdminInvitation(request, env, currentAdmin, id) {
       {
         adminId: target.id,
         invitationEmailSent: false,
+        inviteEmailSent: false,
         deliveryStatus: emailResult.status,
       }
     );
@@ -419,7 +477,9 @@ export async function resendAdminInvitation(request, env, currentAdmin, id) {
   return successResponse(
     {
       invitationEmailSent: true,
+      inviteEmailSent: true,
       invitationExpiresAt: inviteExpiresAt,
+      inviteExpiresAt,
     },
     'Administrator invitation email resent.'
   );

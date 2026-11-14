@@ -1,5 +1,11 @@
 import { generateRandomId } from '../utils/crypto.js';
-import { successResponse, errorResponse, parseJsonBody, safeJsonParse } from '../utils/response.js';
+import {
+  successResponse,
+  errorResponse,
+  parseJsonBody,
+  safeJsonParse,
+  sanitizeText,
+} from '../utils/response.js';
 import { validatePackageInput } from '../validators/schemas.js';
 import { authenticateAdmin } from '../middleware/authMiddleware.js';
 import { logAdminActivity } from '../services/auditService.js';
@@ -329,13 +335,99 @@ export async function deletePackage(request, env, admin, id) {
   return successResponse({ deletedId: id }, 'Package deleted successfully.');
 }
 
+function sanitizeNullablePrice(val) {
+  if (val === null || val === undefined || val === '') return null;
+  const num = Number(val);
+  return Number.isFinite(num) && num >= 0 ? num : null;
+}
+
+function sanitizeConfigItem(item, index, prefix = 'cfg') {
+  if (!item || typeof item !== 'object' || Array.isArray(item)) return null;
+  const title = sanitizeText(item.title || item.name || '', 180);
+  if (!title) return null;
+
+  const hasExplicitPrice = item.price !== undefined;
+  const hasStartingPrice = item.startingPrice !== undefined;
+  const price = hasExplicitPrice
+    ? sanitizeNullablePrice(item.price)
+    : item.monthlyPrice !== undefined
+    ? sanitizeNullablePrice(item.monthlyPrice)
+    : item.yearlyPrice !== undefined
+    ? sanitizeNullablePrice(item.yearlyPrice)
+    : null;
+  const monthlyPrice =
+    item.monthlyPrice !== undefined ? sanitizeNullablePrice(item.monthlyPrice) : undefined;
+  const yearlyPrice =
+    item.yearlyPrice !== undefined ? sanitizeNullablePrice(item.yearlyPrice) : undefined;
+
+  const cleaned = {
+    id: sanitizeText(item.id || `${prefix}-${index + 1}`, 80) || `${prefix}-${index + 1}`,
+    title,
+    name: sanitizeText(item.name || title, 180),
+    description: sanitizeText(item.description || '', 1000),
+    price,
+    ...(hasStartingPrice ? { startingPrice: sanitizeNullablePrice(item.startingPrice) } : {}),
+    ...(monthlyPrice !== undefined && monthlyPrice !== null ? { monthlyPrice } : {}),
+    ...(yearlyPrice !== undefined && yearlyPrice !== null ? { yearlyPrice } : {}),
+    billingCycle: sanitizeText(item.billingCycle || item.billing || '', 60),
+    currency: sanitizeText(item.currency || 'INR', 10),
+    features: Array.isArray(item.features)
+      ? item.features.map((f) => sanitizeText(String(f || ''), 300)).filter(Boolean)
+      : [],
+    recommended: Boolean(item.recommended),
+    active: item.active !== undefined ? Boolean(item.active) : true,
+  };
+
+  const optionalTextFields = [
+    ['bugFixSupport', 300],
+    ['contentUpdateAllowance', 300],
+    ['updateAllowance', 300],
+    ['backupFrequency', 300],
+    ['securityChecks', 300],
+    ['performanceMonitoring', 300],
+    ['responseTime', 300],
+    ['scopeNote', 1000],
+    ['pricingNote', 300],
+    ['category', 160],
+  ];
+  for (const [key, maxLen] of optionalTextFields) {
+    if (item[key] !== undefined && item[key] !== null) {
+      cleaned[key] = sanitizeText(String(item[key]), maxLen);
+    }
+  }
+
+  return cleaned;
+}
+
+export async function getMaintenancePlansConfig(request, env) {
+  const maintRow = await env.DB.prepare(
+    "SELECT setting_value FROM site_settings WHERE setting_key = 'maintenance_plans'"
+  ).first();
+  return successResponse(
+    { maintenancePlans: safeJsonParse(maintRow?.setting_value, []) },
+    'Maintenance plans fetched successfully.'
+  );
+}
+
 export async function updateMaintenancePlansConfig(request, env, admin) {
-  const body = await parseJsonBody(request);
-  const plans = Array.isArray(body.maintenancePlans)
-    ? body.maintenancePlans
-    : Array.isArray(body)
+  const body = await parseJsonBody(request, 1024 * 1024, { allowArray: true });
+  const rawPlans = Array.isArray(body)
     ? body
-    : [];
+    : Array.isArray(body?.maintenancePlans)
+    ? body.maintenancePlans
+    : null;
+
+  if (!rawPlans) {
+    return errorResponse(
+      'Maintenance plans configuration must be an array or an object with a maintenancePlans array.',
+      400,
+      'VALIDATION_ERROR'
+    );
+  }
+
+  const plans = rawPlans
+    .map((item, idx) => sanitizeConfigItem(item, idx, 'maint'))
+    .filter(Boolean);
   const now = new Date().toISOString();
 
   await env.DB.prepare(
@@ -358,9 +450,35 @@ export async function updateMaintenancePlansConfig(request, env, admin) {
   return successResponse({ maintenancePlans: plans }, 'Maintenance plans updated.');
 }
 
+export async function getAddonsConfig(request, env) {
+  const addonsRow = await env.DB.prepare(
+    "SELECT setting_value FROM site_settings WHERE setting_key = 'addons'"
+  ).first();
+  return successResponse(
+    { addons: safeJsonParse(addonsRow?.setting_value, []) },
+    'Add-ons fetched successfully.'
+  );
+}
+
 export async function updateAddonsConfig(request, env, admin) {
-  const body = await parseJsonBody(request);
-  const addons = Array.isArray(body.addons) ? body.addons : Array.isArray(body) ? body : [];
+  const body = await parseJsonBody(request, 1024 * 1024, { allowArray: true });
+  const rawAddons = Array.isArray(body)
+    ? body
+    : Array.isArray(body?.addons)
+    ? body.addons
+    : null;
+
+  if (!rawAddons) {
+    return errorResponse(
+      'Add-ons configuration must be an array or an object with an addons array.',
+      400,
+      'VALIDATION_ERROR'
+    );
+  }
+
+  const addons = rawAddons
+    .map((item, idx) => sanitizeConfigItem(item, idx, 'addon'))
+    .filter(Boolean);
   const now = new Date().toISOString();
 
   await env.DB.prepare(

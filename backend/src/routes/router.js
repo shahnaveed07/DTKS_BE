@@ -51,6 +51,7 @@ import {
   getServiceBySlugOrId,
   createService,
   updateService,
+  bulkUpdateServices,
   deleteService,
 } from '../controllers/servicesController.js';
 import {
@@ -59,7 +60,9 @@ import {
   createPackage,
   updatePackage,
   deletePackage,
+  getMaintenancePlansConfig,
   updateMaintenancePlansConfig,
+  getAddonsConfig,
   updateAddonsConfig,
 } from '../controllers/packagesController.js';
 import {
@@ -134,7 +137,7 @@ function matchPath(pattern, pathname) {
 /**
  * Evaluates production dependency readiness (`GET /api/v1/ready`):
  *   - D1 binding (`env.DB`) exists and responds to a connectivity probe
- *   - All 13 required relational tables exist in D1
+ *   - All 17 required relational tables exist in D1
  *   - R2 storage binding (`env.ASSETS_BUCKET`) is available
  * Never exposes secrets, raw SQL queries, or internal credentials.
  */
@@ -272,8 +275,18 @@ export async function handleApiRequest(request, env) {
       const prefix = pathname.startsWith(`${API_PREFIX}/uploads/`)
         ? `${API_PREFIX}/uploads/`
         : `${API_PREFIX}/assets/`;
-      const key = pathname.slice(prefix.length);
-      const assetRes = await serveImageFromR2(env, key);
+      const rawKey = pathname.slice(prefix.length);
+      let decodedKey = rawKey;
+      try {
+        decodedKey = decodeURIComponent(rawKey);
+      } catch {
+        return applySecurityAndCorsHeaders(
+          errorResponse('Invalid R2 asset key encoding.', 400, 'INVALID_ASSET_KEY'),
+          request,
+          env
+        );
+      }
+      const assetRes = await serveImageFromR2(env, decodedKey);
       if (!assetRes) {
         return applySecurityAndCorsHeaders(
           errorResponse('Uploaded asset not found.', 404, 'ASSET_NOT_FOUND'),
@@ -545,6 +558,12 @@ export async function handleApiRequest(request, env) {
         response = await createService(request, env, auth.admin);
         return applySecurityAndCorsHeaders(response, request, env);
       }
+      if (method === 'PUT') {
+        const auth = await authenticateAdmin(request, env, ROLES_PRIVILEGED_ADMINS);
+        if (!auth.authenticated) return applySecurityAndCorsHeaders(auth.response, request, env);
+        response = await bulkUpdateServices(request, env, auth.admin);
+        return applySecurityAndCorsHeaders(response, request, env);
+      }
     }
 
     const serviceMatch = matchPath(`${API_PREFIX}/services/:slugOrId`, pathname);
@@ -583,18 +602,30 @@ export async function handleApiRequest(request, env) {
       }
     }
 
-    if (pathname === `${API_PREFIX}/packages/config/maintenance` && method === 'PUT') {
-      const auth = await authenticateAdmin(request, env, ROLES_PRIVILEGED_ADMINS);
-      if (!auth.authenticated) return applySecurityAndCorsHeaders(auth.response, request, env);
-      response = await updateMaintenancePlansConfig(request, env, auth.admin);
-      return applySecurityAndCorsHeaders(response, request, env);
+    if (pathname === `${API_PREFIX}/packages/config/maintenance`) {
+      if (method === 'GET') {
+        response = await getMaintenancePlansConfig(request, env);
+        return applySecurityAndCorsHeaders(response, request, env);
+      }
+      if (method === 'PUT') {
+        const auth = await authenticateAdmin(request, env, ROLES_PRIVILEGED_ADMINS);
+        if (!auth.authenticated) return applySecurityAndCorsHeaders(auth.response, request, env);
+        response = await updateMaintenancePlansConfig(request, env, auth.admin);
+        return applySecurityAndCorsHeaders(response, request, env);
+      }
     }
 
-    if (pathname === `${API_PREFIX}/packages/config/addons` && method === 'PUT') {
-      const auth = await authenticateAdmin(request, env, ROLES_PRIVILEGED_ADMINS);
-      if (!auth.authenticated) return applySecurityAndCorsHeaders(auth.response, request, env);
-      response = await updateAddonsConfig(request, env, auth.admin);
-      return applySecurityAndCorsHeaders(response, request, env);
+    if (pathname === `${API_PREFIX}/packages/config/addons`) {
+      if (method === 'GET') {
+        response = await getAddonsConfig(request, env);
+        return applySecurityAndCorsHeaders(response, request, env);
+      }
+      if (method === 'PUT') {
+        const auth = await authenticateAdmin(request, env, ROLES_PRIVILEGED_ADMINS);
+        if (!auth.authenticated) return applySecurityAndCorsHeaders(auth.response, request, env);
+        response = await updateAddonsConfig(request, env, auth.admin);
+        return applySecurityAndCorsHeaders(response, request, env);
+      }
     }
 
     const packageMatch = matchPath(`${API_PREFIX}/packages/:id`, pathname);
@@ -643,8 +674,18 @@ export async function handleApiRequest(request, env) {
     if (pathname.startsWith(`${API_PREFIX}/portfolio/upload/`) && method === 'DELETE') {
       const auth = await authenticateAdmin(request, env, ROLES_PRIVILEGED_ADMINS);
       if (!auth.authenticated) return applySecurityAndCorsHeaders(auth.response, request, env);
-      const key = pathname.slice(`${API_PREFIX}/portfolio/upload/`.length);
-      response = await deletePortfolioImage(request, env, auth.admin, key);
+      const rawKey = pathname.slice(`${API_PREFIX}/portfolio/upload/`.length);
+      let decodedKey = rawKey;
+      try {
+        decodedKey = decodeURIComponent(rawKey);
+      } catch {
+        return applySecurityAndCorsHeaders(
+          errorResponse('Invalid R2 asset key encoding.', 400, 'INVALID_ASSET_KEY'),
+          request,
+          env
+        );
+      }
+      response = await deletePortfolioImage(request, env, auth.admin, decodedKey);
       return applySecurityAndCorsHeaders(response, request, env);
     }
 

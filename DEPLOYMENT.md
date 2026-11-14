@@ -54,9 +54,16 @@ npx wrangler secret put RESEND_API_KEY
 
 ---
 
-## 4. Deploy to the Existing `dtks-be` Cloudflare Worker
+## 4. Pre-Deployment Verification & Worker Deploy (`dtks-be`)
 
-From `/backend`, deploy the updated Worker code to `dtks-be`:
+Before deploying to production, verify tests, TypeScript checks, and Wrangler dry-run locally:
+
+```bash
+npm test && npm run build
+cd backend && npm test && npx wrangler deploy --dry-run
+```
+
+Then deploy the updated Worker code to `dtks-be`:
 
 ```bash
 cd backend
@@ -64,7 +71,7 @@ npx wrangler deploy
 ```
 
 ### Custom Domain & Safe Route Configuration
-In `backend/wrangler.toml`, `name = "dtks-be"` and `workers_dev = true` ensure deployment updates the existing `dtks-be` Worker (`https://dtks-be.snave9401.workers.dev`) and preserves the custom API domain (`https://api.dreamtechkashmirsolutions.studio`) without overriding the separate frontend website hosted at `https://dreamtechkashmirsolutions.studio/`.
+In `backend/wrangler.toml`, `name = "dtks-be"` and `workers_dev = true` ensure deployment updates the existing `dtks-be` Worker (`https://dtks-be.snave9401.workers.dev`) and preserves the custom API domain (`https://api.dreamtechkashmirsolutions.studio`) without overriding the separate frontend website hosted at `https://dreamtechkashmirsolutions.studio/`. Under `ENVIRONMENT = "production"`, development origins (`localhost`, `127.0.0.1`, `*.run.app`) are automatically blocked unless `ALLOW_LOCAL_CORS = "true"` is explicitly configured.
 
 ---
 

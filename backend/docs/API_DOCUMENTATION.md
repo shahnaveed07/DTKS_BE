@@ -74,13 +74,14 @@
 ## 3. CORS Configuration & Security Headers
 
 ### Allowed Origins
-- `https://dreamtechkashmirsolutions.studio`
-- `https://www.dreamtechkashmirsolutions.studio`
-- `http://localhost:3000` (development)
-- `http://localhost:5173` (development)
-- `http://localhost:8787` (development)
+- **Production (`ENVIRONMENT=production`)**:
+  - `https://dreamtechkashmirsolutions.studio`
+  - `https://www.dreamtechkashmirsolutions.studio`
+  - Plus any explicit production origins in `CORS_ALLOWED_ORIGINS` (development `localhost`, `127.0.0.1`, `[::1]`, and `*.run.app` origins are strictly rejected with `403 CORS_ORIGIN_FORBIDDEN` in production unless `ALLOW_LOCAL_CORS=true` is explicitly enabled).
+- **Development (`ENVIRONMENT=development`)**:
+  - Production origins plus `http://localhost:3000`, `http://127.0.0.1:3000`, `http://localhost:5173`, `http://127.0.0.1:5173`, `http://localhost:8787`, and `https://*.run.app`.
 
-Requests with an unauthorized `Origin` header receive `403 Forbidden` (`CORS_ORIGIN_FORBIDDEN`).
+Requests with an unauthorized `Origin` header receive `403 Forbidden` (`CORS_ORIGIN_FORBIDDEN`). When no `Origin` header is sent (e.g. server-to-server `curl`), `Access-Control-Allow-Origin` is omitted rather than falling back to a hardcoded origin.
 
 ### CORS Headers & Authentication Transport
 CORS preflight (`OPTIONS`) permits:
@@ -194,12 +195,12 @@ Revokes a single `refreshToken` (`allDevices: false`, `scope: "single_device"`) 
 
 | Method | Endpoint | Auth / Role | Description |
 | :--- | :--- | :--- | :--- |
-| `GET` | `/api/v1/admin/accounts` | `super_admin`, `admin` | List admin accounts with `activeSessionCount`, `invitePending`, and `pagination` (`?search=`, `?role=`, `?status=all\|active\|inactive`, `?isActive=`, `?page=`, `?limit=`) |
-| `GET` | `/api/v1/admin/accounts/:id` | `super_admin`, `admin` | Inspect admin account, recent refresh sessions, and latest invitation metadata |
-| `POST` | `/api/v1/admin/accounts` | `super_admin` only | Create pending admin account (`isActive: false`) and dispatch 48h invitation email via Resend (`503` includes `adminCreated`, `invitationEmailSent`, `deliveryStatus`, `account`) |
+| `GET` | `/api/v1/admin/accounts` | `super_admin`, `admin` | List admin accounts with `activeSessionCount`, `activeSessions`, `invitePending`, `inviteExpiresAt`, `inviteExpired`, and `pagination` (`?search=`, `?role=`, `?status=all\|active\|inactive\|pending\|expired`, `?isActive=`, `?page=`, `?limit=`) |
+| `GET` | `/api/v1/admin/accounts/:id` | `super_admin`, `admin` | Inspect admin account, recent refresh sessions, `activeSessions`, `inviteExpiresAt`, `inviteExpired`, and latest invitation metadata |
+| `POST` | `/api/v1/admin/accounts` | `super_admin` only | Create pending admin account (`isActive: false`) and dispatch 48h invitation email via Resend (`503` includes `adminCreated`, `invitationEmailSent`, `inviteEmailSent`, `inviteExpiresAt`, `deliveryStatus`, `account`) |
 | `POST` | `/api/v1/admin/accounts/:id/resend-invite` | `super_admin` only | Revoke prior unused invite tokens and resend fresh invitation email for pending admins |
-| `PATCH` | `/api/v1/admin/accounts/:id` | `super_admin` only | Update `name` and/or `role` (`super_admin`, `admin`, `editor`). Role changes revoke all sessions & bump `token_version`. Protects last active `super_admin` (`409 LAST_SUPER_ADMIN_PROTECTED`) |
-| `PATCH` | `/api/v1/admin/accounts/:id/status` | `super_admin` only | Activate (`{ "isActive": true }`) or deactivate (`{ "isActive": false }`) an account. Deactivation sets `deactivated_at`, bumps `token_version`, and revokes sessions. Protects last active `super_admin` |
+| `PATCH` / `PUT` | `/api/v1/admin/accounts/:id` | `super_admin` only | Update `name` and/or `role` (`super_admin`, `admin`, `editor`). Role changes revoke all sessions & bump `token_version`. Protects last active `super_admin` (`409 LAST_SUPER_ADMIN_PROTECTED`) |
+| `PATCH` / `PUT` | `/api/v1/admin/accounts/:id/status` | `super_admin` only | Activate (`{ "isActive": true }`) or deactivate (`{ "isActive": false }`) an account. Deactivation sets `deactivated_at`, bumps `token_version`, and revokes sessions. Protects last active `super_admin` |
 | `DELETE` | `/api/v1/admin/accounts/:id/sessions` | `super_admin` only | Revoke all active refresh sessions and bump `token_version` so existing access tokens fail immediately (`401 SESSION_REVOKED`) |
 
 ---
@@ -241,10 +242,11 @@ All endpoints require a valid **Client** JWT (`authenticateClient`) and strictly
 | Method | Endpoint | Auth | Description |
 | :--- | :--- | :--- | :--- |
 | `GET` | `/api/v1/services` | Public (Admin sees inactive with `?includeInactive=true`) | List website services ordered by `display_order ASC` |
-| `GET` | `/api/v1/services/:slug` | Public | Get single service by `slug` or `id` |
-| `POST` | `/api/v1/services` | Admin | Create a new website service |
-| `PUT` | `/api/v1/services/:id` | Admin | Update an existing service |
-| `DELETE` | `/api/v1/services/:id` | Admin | Delete a service |
+| `GET` | `/api/v1/services/:slugOrId` | Public | Get single service by `slug` or `id` |
+| `POST` | `/api/v1/services` | Admin (All roles) | Create a new website service |
+| `PUT` | `/api/v1/services` | Admin (`super_admin`, `admin`) | Bulk sync/upsert website services catalog (accepts a raw JSON array `[...]` or `{ "services": [...] }`) |
+| `PUT` / `PATCH` | `/api/v1/services/:slugOrId` | Admin (All roles) | Update an existing service |
+| `DELETE` | `/api/v1/services/:slugOrId` | Admin (`super_admin`, `admin`) | Delete a service |
 
 - **Create/Update Request Body Example:**
   ```json
@@ -262,15 +264,19 @@ All endpoints require a valid **Client** JWT (`authenticateClient`) and strictly
 
 ---
 
-### 4.3 Packages Management (`/api/v1/packages`)
+### 4.3 Packages & Configuration (`/api/v1/packages`)
 
 | Method | Endpoint | Auth | Description |
 | :--- | :--- | :--- | :--- |
-| `GET` | `/api/v1/packages` | Public | List packages (supports `?service_id=`, `?category=`, `?includeInactive=true`) |
+| `GET` | `/api/v1/packages` | Public | List packages along with `maintenancePlans` and `addons` (supports `?service_id=`, `?category=`, `?includeInactive=true`) |
 | `GET` | `/api/v1/packages/:id` | Public | Get package details by ID |
-| `POST` | `/api/v1/packages` | Admin | Create a website package |
-| `PUT` | `/api/v1/packages/:id` | Admin | Update a website package |
-| `DELETE` | `/api/v1/packages/:id` | Admin | Delete a website package |
+| `POST` | `/api/v1/packages` | Admin (All roles) | Create a website package |
+| `PUT` / `PATCH` | `/api/v1/packages/:id` | Admin (All roles) | Update a website package |
+| `DELETE` | `/api/v1/packages/:id` | Admin (`super_admin`, `admin`) | Delete a website package |
+| `GET` | `/api/v1/packages/config/maintenance` | Public | Get stored website maintenance plans configuration |
+| `PUT` | `/api/v1/packages/config/maintenance` | Admin (`super_admin`, `admin`) | Update maintenance plans configuration (accepts a raw JSON array `[...]` or `{ "maintenancePlans": [...] }`) |
+| `GET` | `/api/v1/packages/config/addons` | Public | Get stored optional website add-ons configuration |
+| `PUT` | `/api/v1/packages/config/addons` | Admin (`super_admin`, `admin`) | Update optional add-ons configuration (accepts a raw JSON array `[...]` or `{ "addons": [...] }`) |
 
 - **Create/Update Request Body Example:**
   ```json
@@ -288,17 +294,18 @@ All endpoints require a valid **Client** JWT (`authenticateClient`) and strictly
 
 ---
 
-### 4.4 Portfolio & Cloudflare R2 Uploads (`/api/v1/portfolio`)
+### 4.4 Portfolio & Cloudflare R2 Media (`/api/v1/portfolio`, `/api/v1/uploads`)
 
 | Method | Endpoint | Auth | Description |
 | :--- | :--- | :--- | :--- |
 | `GET` | `/api/v1/portfolio` | Public | List published portfolio items (supports `?category=`, `?page=1&limit=10`, `?includeUnpublished=true`) |
-| `GET` | `/api/v1/portfolio/:slug` | Public | Get portfolio project by `slug` or `id` |
-| `POST` | `/api/v1/portfolio` | Admin | Create portfolio project |
-| `PUT` | `/api/v1/portfolio/:id` | Admin | Update portfolio project (replaces old R2 thumbnail if changed) |
-| `DELETE` | `/api/v1/portfolio/:id` | Admin | Delete portfolio project and clean up R2 images |
-| `POST` | `/api/v1/portfolio/upload` | Admin | Upload JPEG/PNG/WebP image (max 5MB, magic-byte verified) to R2 |
-| `DELETE` | `/api/v1/portfolio/upload` | Admin | Delete image from R2 by `{ "key": "portfolio/..." }` or `/portfolio/upload/:key` |
+| `GET` | `/api/v1/portfolio/:slugOrId` | Public | Get portfolio project by `slug` or `id` |
+| `POST` | `/api/v1/portfolio` | Admin (All roles) | Create portfolio project |
+| `PUT` / `PATCH` | `/api/v1/portfolio/:slugOrId` | Admin (All roles) | Update portfolio project (replaces old R2 thumbnail if changed) |
+| `DELETE` | `/api/v1/portfolio/:slugOrId` | Admin (`super_admin`, `admin`) | Delete portfolio project and clean up R2 images |
+| `POST` | `/api/v1/portfolio/upload` | Admin (All roles) | Upload JPEG/PNG/WebP image (max 5MB, magic-byte verified) to R2; accepts `folder` or `entityType` (`portfolio`, `services`, `team`, `general`), plus `replaceKey`; returns `{ id, key, url, publicUrl, mimeType, sizeBytes }` |
+| `DELETE` | `/api/v1/portfolio/upload` | Admin (`super_admin`, `admin`) | Delete image from R2 by `?key=`, JSON `{ "key": "..." }` / `{ "url": "..." }`, or `/api/v1/portfolio/upload/:encodedKeyOrUrl` (`400 INVALID_ASSET_KEY` on malformed URI encoding or path traversal) |
+| `GET` | `/api/v1/uploads/:key` & `/api/v1/assets/:key` | Public | Stream uploaded image asset from Cloudflare R2 |
 
 ---
 
@@ -310,9 +317,9 @@ All endpoints require a valid **Client** JWT (`authenticateClient`) and strictly
 | `GET` | `/api/v1/orders/track` | Public | Track order by `?ref=DKS-2026-0001&email=customer@example.com` |
 | `GET` | `/api/v1/orders` | Admin | List orders (supports `?status=`, `?service=`, `?search=`) |
 | `GET` | `/api/v1/orders/:id` | Admin | Get full order details, line items, and status history |
-| `PATCH` | `/api/v1/orders/:id/status` | Admin | Update order status (`Pending`, `Reviewed`, `Approved`, `InProgress`, `Completed`, `Rejected`, `Cancelled`) |
-| `PATCH` | `/api/v1/orders/:id` | Admin | Update order status, quotation amount, timeline, and admin notes |
-| `DELETE` | `/api/v1/orders/:id` | Admin | Delete an order |
+| `PATCH` / `PUT` | `/api/v1/orders/:id/status` | Admin (All roles) | Update order status (`Pending`, `New Request`, `Reviewed`, `Under Review`, `Requirements Clarification`, `Quotation Sent`, `Awaiting Customer Approval`, `Approved`, `InProgress`, `In Progress`, `Under Testing`, `Completed`, `Rejected`, `Cancelled`) |
+| `PATCH` / `PUT` | `/api/v1/orders/:id` | Admin (All roles) | Update order status, quotation amount, timeline, and admin notes |
+| `DELETE` | `/api/v1/orders/:id` | Admin (`super_admin`, `admin`) | Delete an order |
 
 - **Public Order Submission (`POST /api/v1/orders`) Example:**
   ```json
@@ -335,38 +342,43 @@ All endpoints require a valid **Client** JWT (`authenticateClient`) and strictly
 | Method | Endpoint | Auth | Description |
 | :--- | :--- | :--- | :--- |
 | `POST` | `/api/v1/contact` | Public (Rate-limited) | Submit contact message (validates fields, sanitizes XSS, checks honeypot) |
-| `GET` | `/api/v1/contact` | Admin | List & search contact messages (`?status=`, `?search=`) |
-| `GET` | `/api/v1/contact/:id` | Admin | View single contact message |
-| `PATCH` | `/api/v1/contact/:id` | Admin | Update message status (`New`, `In Review`, `Replied`, `Archived`) and `admin_notes` |
-| `DELETE` | `/api/v1/contact/:id` | Admin | Delete contact message |
+| `GET` | `/api/v1/contact` | Admin (All roles) | List & search contact messages (`?status=`, `?search=`) |
+| `GET` | `/api/v1/contact/:id` | Admin (All roles) | View single contact message |
+| `PATCH` / `PUT` | `/api/v1/contact/:id` | Admin (All roles) | Update message status (`New`, `Read`, `In Review`, `Replied`, `Archived`) and `admin_notes` |
+| `DELETE` | `/api/v1/contact/:id` | Admin (`super_admin`, `admin`) | Delete contact message |
 
 ---
 
-### 4.7 Admin Dashboard & Analytics (`/api/v1/admin/dashboard/*`)
+### 4.7 Admin Dashboard, Customers & Analytics (`/api/v1/admin/*`, `/api/v1/customers`)
 
 | Method | Endpoint | Auth | Description |
 | :--- | :--- | :--- | :--- |
-| `GET` | `/api/v1/admin/dashboard/stats` | Admin | Real-time counts from D1 (`totalOrders`, `pendingOrders`, `completedOrders`, `totalCustomers`, `totalContactMessages`, `activeServices`, `activePackages`, `totalPortfolioItems`) |
-| `GET` | `/api/v1/admin/dashboard/recent-orders` | Admin | Latest orders (`?limit=5`) |
-| `GET` | `/api/v1/admin/dashboard/recent-messages` | Admin | Latest contact inquiries (`?limit=5`) |
-| `GET` | `/api/v1/admin/dashboard/order-analytics` | Admin | Aggregated order counts & quoted values grouped by status, service, hosting preference, and month |
+| `GET` | `/api/v1/admin/dashboard/stats` | Admin (All roles) | Real-time counts from D1 (`totalOrders`, `pendingOrders`, `completedOrders`, `totalCustomers`, `totalContactMessages`, `activeServices`, `activePackages`, `totalPortfolioItems`) |
+| `GET` | `/api/v1/admin/dashboard/recent-orders` | Admin (All roles) | Latest orders (`?limit=5`) |
+| `GET` | `/api/v1/admin/dashboard/recent-messages` | Admin (All roles) | Latest contact inquiries (`?limit=5`) |
+| `GET` | `/api/v1/admin/dashboard/order-analytics` | Admin (All roles) | Aggregated order counts & quoted values grouped by status, service, hosting preference, and month |
+| `GET` | `/api/v1/customers` | Admin (All roles) | List customer records with aggregated order counts (linked by `customer_id` or legacy unlinked email) |
+| `GET` | `/api/v1/customers/:id` | Admin (All roles) | Inspect single customer record and associated orders |
+| `GET` | `/api/v1/admin/activity-logs` | Admin (`super_admin`, `admin`) | Audit trail of admin actions, logins, hash migrations, and transactional email delivery logs (`?limit=50`) |
+| `GET` | `/api/v1/admin/notifications` | Admin (`super_admin`, `admin`) | Recent admin notifications derived from live database activity |
 
 ---
 
-### 4.8 Site Settings (`/api/v1/settings`)
+### 4.8 Site Settings, Team, Testimonials & Bootstrap
 
 | Method | Endpoint | Auth | Description |
 | :--- | :--- | :--- | :--- |
-| `GET` | `/api/v1/settings` | Public | Returns public site settings (company name, email, phone, social links, business hours, hero content, SEO metadata) with sensitive keys stripped |
-| `PUT` | `/api/v1/settings` | Admin (`super_admin`, `admin`) | Updates site settings in `site_settings` and logs admin activity |
-
----
-
-### 4.9 Admin Activity Logs (`/api/v1/admin/activity-logs`)
-
-| Method | Endpoint | Auth | Description |
-| :--- | :--- | :--- | :--- |
-| `GET` | `/api/v1/admin/activity-logs` | Admin (`super_admin`, `admin`) | Returns audit trail of admin actions, logins, password hash migrations, and transactional email delivery logs (`?limit=50`) |
+| `GET` | `/api/v1/bootstrap` | Public | Combined public website payload (services, packages, maintenancePlans, addons, portfolio, settings, team, testimonials) |
+| `GET` | `/api/v1/settings` | Public | Returns public site settings with sensitive & prototype keys stripped recursively |
+| `PUT` / `PATCH` | `/api/v1/settings` | Admin (`super_admin`, `admin`) | Deep-sanitizes and updates site settings in `site_settings` |
+| `GET` | `/api/v1/team` | Public (Admin sees hidden with `?includeHidden=true`) | List team members ordered by `sortOrder` (includes `order` compatibility alias) |
+| `POST` | `/api/v1/team` | Admin (All roles) | Add a team member |
+| `PATCH` / `PUT` | `/api/v1/team/:id` | Admin (All roles) | Update team member (whitelisted, XSS-sanitized fields only) |
+| `POST` / `PATCH` | `/api/v1/team/:id/reorder` | Admin (All roles) | Move team member `up` or `down` in display order |
+| `DELETE` | `/api/v1/team/:id` | Admin (`super_admin`, `admin`) | Remove team member |
+| `GET` | `/api/v1/testimonials` | Public | List published client testimonials |
+| `POST` | `/api/v1/testimonials` | Admin (All roles) | Create client testimonial |
+| `DELETE` | `/api/v1/testimonials/:id` | Admin (`super_admin`, `admin`) | Delete client testimonial |
 
 ---
 

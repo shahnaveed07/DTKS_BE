@@ -1,6 +1,9 @@
 import { DatabaseSync } from 'node:sqlite';
 import fs from 'node:fs';
 import path from 'node:path';
+import { fileURLToPath } from 'node:url';
+
+const DEFAULT_MIGRATIONS_DIR = fileURLToPath(new URL('../../migrations', import.meta.url));
 
 /**
  * Cloudflare D1 + R2 Local/Node Runtime Adapter
@@ -105,20 +108,37 @@ export class LocalD1Database {
 
   async batch(statements = []) {
     const results = [];
-    this.sqlite.exec('BEGIN TRANSACTION;');
+    this.sqlite.exec('BEGIN IMMEDIATE TRANSACTION;');
     try {
       for (const stmt of statements) {
+        const prepared = this.sqlite.prepare(stmt.sql);
+        const bound = stmt.boundValues || [];
         const isSelect = /^\s*SELECT/i.test(stmt.sql);
         if (isSelect) {
-          results.push(await stmt.all());
+          results.push({
+            success: true,
+            results: prepared.all(...bound),
+            meta: {},
+          });
         } else {
-          results.push(await stmt.run());
+          const info = prepared.run(...bound);
+          results.push({
+            success: true,
+            meta: {
+              changes: Number(info.changes || 0),
+              last_row_id: Number(info.lastInsertRowid || 0),
+            },
+          });
         }
       }
       this.sqlite.exec('COMMIT;');
       return results;
     } catch (err) {
-      this.sqlite.exec('ROLLBACK;');
+      try {
+        this.sqlite.exec('ROLLBACK;');
+      } catch {
+        // Ignore rollback if transaction was already closed
+      }
       throw err;
     }
   }
@@ -206,7 +226,7 @@ export class LocalR2Bucket {
 export function createNodeWorkerEnv({
   dbPath = path.resolve(process.cwd(), 'data/dtks.sqlite'),
   r2Dir = path.resolve(process.cwd(), 'data/r2-storage'),
-  migrationsDir = path.resolve(process.cwd(), 'backend/migrations'),
+  migrationsDir = DEFAULT_MIGRATIONS_DIR,
   overrides = {},
 } = {}) {
   const migrationFiles = [
@@ -244,7 +264,9 @@ export function createNodeWorkerEnv({
       process.env.INITIAL_ADMIN_PASSWORD || process.env.ADMIN_INITIAL_PASSWORD || '',
     CORS_ALLOWED_ORIGINS:
       process.env.CORS_ALLOWED_ORIGINS ||
-      'https://dreamtechkashmirsolutions.studio,https://www.dreamtechkashmirsolutions.studio,http://localhost:3000,http://localhost:5173',
+      ((process.env.ENVIRONMENT || process.env.NODE_ENV) === 'production'
+        ? 'https://dreamtechkashmirsolutions.studio,https://www.dreamtechkashmirsolutions.studio'
+        : 'https://dreamtechkashmirsolutions.studio,https://www.dreamtechkashmirsolutions.studio,http://localhost:3000,http://localhost:5173'),
     RESEND_API_KEY:
       process.env.RESEND_API_KEY || process.env.EMAIL_PROVIDER_API_KEY || '',
     EMAIL_FROM_ADDRESS:
