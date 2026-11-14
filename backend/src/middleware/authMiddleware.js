@@ -1,12 +1,36 @@
 import { verifyJwt } from '../utils/crypto.js';
 import { errorResponse } from '../utils/response.js';
 
+/**
+ * Retrieves the configured JWT signing secret.
+ * In production (`ENVIRONMENT === "production"`), a strong secret (>= 32 characters)
+ * MUST be explicitly configured via Cloudflare secrets (`JWT_SECRET`).
+ */
 export function getJwtSecret(env = {}) {
-  return (
-    env.JWT_SECRET ||
-    (typeof process !== 'undefined' && process.env?.JWT_SECRET) ||
-    'dtks-production-grade-fallback-hmac-secret-2026-kashmir'
-  );
+  const configured =
+    env.JWT_SECRET || (typeof process !== 'undefined' && process.env?.JWT_SECRET) || '';
+  const isProd =
+    env.ENVIRONMENT === 'production' ||
+    (typeof process !== 'undefined' && process.env?.NODE_ENV === 'production');
+
+  if (isProd) {
+    if (
+      !configured ||
+      configured.length < 32 ||
+      configured.includes('replace-with') ||
+      configured.includes('fallback')
+    ) {
+      const err = new Error(
+        'CRITICAL SECURITY ERROR: Production JWT_SECRET must be explicitly configured and at least 32 characters.'
+      );
+      err.status = 500;
+      err.code = 'SERVER_MISCONFIGURED';
+      throw err;
+    }
+    return configured;
+  }
+
+  return configured || 'dtks-local-dev-only-ephemeral-hmac-secret-key-2026';
 }
 
 function parseCookies(cookieHeader = '') {
@@ -78,6 +102,9 @@ export async function authenticateAdmin(
   try {
     decoded = await verifyJwt(token, getJwtSecret(env));
   } catch (err) {
+    if (err.code === 'SERVER_MISCONFIGURED') {
+      throw err;
+    }
     const code = err.code === 'TOKEN_EXPIRED' ? 'TOKEN_EXPIRED' : 'INVALID_TOKEN';
     return {
       authenticated: false,

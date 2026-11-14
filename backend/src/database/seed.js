@@ -1,9 +1,17 @@
 import { hashPassword } from '../utils/crypto.js';
+import { isValidEmail } from '../validators/schemas.js';
 
 /**
- * Self-contained DTKS Database Seed Data
- * Ensures the backend is 100% standalone and independently deployable without
- * requiring any frontend files or frontend build artifacts.
+ * Safe, Non-Destructive DTKS Database Initializer (`seed.js`)
+ *
+ * Security & Persistence Guarantees:
+ *   1. NEVER uses hardcoded default administrator credentials or fallback passwords.
+ *   2. Initial administrator is created ONLY when the `admins` table is empty AND
+ *      valid `INITIAL_ADMIN_EMAIL` + `INITIAL_ADMIN_PASSWORD` (>= 12 chars in production,
+ *      >= 8 chars in dev/test, not a placeholder) are explicitly supplied via environment secrets.
+ *   3. Uses `INSERT OR IGNORE` exclusively — NEVER `INSERT OR REPLACE` or `DELETE` —
+ *      guaranteeing that existing production records are never overwritten or erased.
+ *   4. Destructive reset/reseed functionality has been permanently removed.
  */
 
 const SEED_SERVICES = [
@@ -475,109 +483,12 @@ const SEED_PORTFOLIO = [
   },
 ];
 
-const SEED_ORDERS = [
-  {
-    id: 'ord-demo-1',
-    orderNumber: 'DKS-2026-0001',
-    serviceName: 'Business & Corporate Websites',
-    packageId: 'pkg-business-website',
-    packageTitle: 'Business Website Package',
-    projectName: 'Sample Local Business Website',
-    businessName: 'Chinar Valley Enterprises',
-    projectDescription:
-      'Sample 6-page corporate website with service pages, gallery, and customer inquiry form.',
-    requiredPages: 'Home, About Us, Services, Gallery, FAQ, Contact',
-    requiredFunctionality: 'Lead inquiry form, WhatsApp button, downloadable brochure',
-    referenceWebsites: 'https://example.com',
-    preferredDesignStyle: 'Clean corporate white and emerald green',
-    requiredIntegrations: 'Google Maps, WhatsApp Chat, Basic SEO',
-    additionalInstructions: 'Sample demonstration order for testing the Admin and Order Tracking pages.',
-    domainPreference: 'Already own a domain',
-    hostingPreference: 'Customer-managed',
-    hostingNotes: 'Customer owns domain on Cloudflare; deploy to customer hosting account.',
-    maintenanceInterest: 'Interested',
-    maintenancePlanSelected: 'Standard',
-    budget: '₹15,000 – ₹30,000',
-    expectedDeliveryDate: '2026-04-15',
-    expectedTimeline: '2–3 Weeks',
-    urgency: 'Standard (3–6 Weeks)',
-    customerName: 'Demo Customer',
-    customerEmail: 'demo.customer@example.com',
-    customerPhone: '+91 90000 00001',
-    customerCity: 'Srinagar',
-    status: 'Quotation Sent',
-    quotationAmount: 30000,
-    quotationCurrency: 'INR',
-    quotationNotes:
-      'Includes 6 custom responsive pages, inquiry form, on-page SEO setup, and deployment to your hosting account.',
-    customerUpdate:
-      'Your website requirements have been reviewed and a formal quotation has been prepared.',
-    adminNotes: 'Initial sample order pre-loaded for Admin workflow demonstration.',
-    createdAt: '2026-02-20T09:30:00.000Z',
-    updatedAt: '2026-02-22T14:15:00.000Z',
-  },
-  {
-    id: 'ord-demo-2',
-    orderNumber: 'DKS-2026-0002',
-    serviceName: 'Booking & Appointment Websites',
-    packageId: 'pkg-custom-website',
-    packageTitle: 'Custom Website & Portal Package',
-    projectName: 'Valley Wellness Clinic Appointment Website (Demo)',
-    businessName: 'Valley Wellness Clinic',
-    projectDescription:
-      'Clinic website with doctor profiles, department pages, and online patient appointment request form.',
-    requiredPages: 'Home, Doctors, Departments, Book Appointment, Contact',
-    requiredFunctionality: 'Doctor schedule filter, appointment request form, WhatsApp confirmation link',
-    referenceWebsites: '',
-    preferredDesignStyle: 'Clean medical green and white',
-    requiredIntegrations: 'Google Maps, Email notifications',
-    additionalInstructions: 'We need DreamTech to manage both the domain renewal and cloud hosting.',
-    domainPreference: 'Need new domain registration',
-    hostingPreference: 'DreamTech-managed',
-    hostingNotes: 'Register .in domain and provision DreamTech-managed cloud hosting with SSL.',
-    maintenanceInterest: 'Interested',
-    maintenancePlanSelected: 'Premium',
-    budget: '₹30,000 – ₹60,000',
-    expectedDeliveryDate: '2026-04-28',
-    expectedTimeline: '3–4 Weeks',
-    urgency: 'Priority (2–3 Weeks)',
-    customerName: 'Sample Clinic Coordinator',
-    customerEmail: 'clinic.demo@example.com',
-    customerPhone: '+91 90000 00002',
-    customerCity: 'Srinagar',
-    status: 'In Progress',
-    quotationAmount: 48000,
-    quotationCurrency: 'INR',
-    quotationNotes:
-      'Includes custom appointment booking workflow, DreamTech-managed hosting setup, and Premium monthly maintenance.',
-    customerUpdate: 'Frontend page templates and doctor directory layout are currently in progress.',
-    adminNotes: 'Sample active website build with DreamTech-managed hosting.',
-    createdAt: '2026-02-24T11:00:00.000Z',
-    updatedAt: '2026-02-25T16:40:00.000Z',
-  },
-];
-
-const SEED_INQUIRIES = [
-  {
-    id: 'inq-demo-1',
-    name: 'Sample Prospective Client',
-    email: 'inquiry.demo@example.com',
-    phone: '+91 90000 00003',
-    subject: 'Question about DreamTech-managed website hosting renewals',
-    message:
-      'Hello DTKS team, we want to build a 5-page business website and would like DreamTech to manage the domain, hosting, and monthly updates. Can you share how annual hosting billing works?',
-    status: 'New',
-    adminNotes: '',
-    createdAt: '2026-02-25T10:20:00.000Z',
-  },
-];
-
 const SEED_SETTINGS = {
   companyName: 'DreamTech Kashmir Solutions',
   shortName: 'DTKS',
   tagline: 'Modern Website Design, Development, Hosting & Maintenance in Kashmir',
   websiteUrl: 'https://dreamtechkashmirsolutions.studio',
-  contactEmail: 'contact@dreamtechkashmir.example',
+  contactEmail: 'contact@dreamtechkashmirsolutions.studio',
   contactPhone: '+91 (000) 000-0000 (Placeholder)',
   whatsappNumber: '+91 (000) 000-0000 (Placeholder)',
   businessLocation: 'Srinagar, Jammu & Kashmir (Office Address Configurable)',
@@ -755,46 +666,57 @@ const SEED_TEAM = [
   },
 ];
 
-const seededDatabases = new WeakSet();
+const initializedDatabases = new WeakSet();
 
-export async function ensureDatabaseSeeded(env, { force = false } = {}) {
+function isValidBootstrapPassword(password, isProduction = false) {
+  if (typeof password !== 'string') return false;
+  const trimmed = password.trim();
+  const minLength = isProduction ? 12 : 8;
+  if (trimmed.length < minLength || trimmed.length > 128) return false;
+  if (/replace-with|changeme|password123/i.test(trimmed)) return false;
+  return true;
+}
+
+/**
+ * Safely and idempotently initializes reference catalog records and optional initial administrator.
+ * Never overwrites or deletes existing database rows.
+ */
+export async function ensureDatabaseSeeded(env) {
   if (!env?.DB) return;
-  if (seededDatabases.has(env.DB) && !force) return;
+  if (initializedDatabases.has(env.DB)) return;
 
   const now = new Date().toISOString();
+  const isProduction = env.ENVIRONMENT === 'production';
 
-  // 1. Seed Initial Administrator
+  // 1. Safe Initial Administrator Bootstrap (ONLY if `admins` table is empty AND explicit credentials are provided)
   const adminCountRow = await env.DB.prepare('SELECT COUNT(*) AS cnt FROM admins').first();
-  if (!adminCountRow || Number(adminCountRow.cnt) === 0 || force) {
-    const adminEmail =
-      env.INITIAL_ADMIN_EMAIL ||
-      (typeof process !== 'undefined' && process.env?.INITIAL_ADMIN_EMAIL) ||
-      'admin@dreamtechkashmirsolutions.studio';
-    const adminPassword =
-      env.INITIAL_ADMIN_PASSWORD ||
-      (typeof process !== 'undefined' && process.env?.INITIAL_ADMIN_PASSWORD) ||
-      'Admin@DTKS2026!';
-    const adminName =
+  if (!adminCountRow || Number(adminCountRow.cnt) === 0) {
+    const rawEmail = (env.INITIAL_ADMIN_EMAIL || env.ADMIN_INITIAL_EMAIL || '').trim().toLowerCase();
+    const rawPassword = env.INITIAL_ADMIN_PASSWORD || env.ADMIN_INITIAL_PASSWORD || '';
+    const adminName = (
       env.INITIAL_ADMIN_NAME ||
-      (typeof process !== 'undefined' && process.env?.INITIAL_ADMIN_NAME) ||
-      'DTKS Principal Administrator';
+      env.ADMIN_INITIAL_NAME ||
+      'DTKS Principal Administrator'
+    ).trim();
 
-    const passwordHash = await hashPassword(adminPassword);
-    await env.DB.prepare(
-      `INSERT OR IGNORE INTO admins (id, name, email, password_hash, role, is_active, created_at, updated_at, last_login_at)
-       VALUES ('adm-root-1', ?, ?, ?, 'super_admin', 1, ?, ?, NULL)`
-    )
-      .bind(adminName, adminEmail, passwordHash, now, now)
-      .run();
+    if (isValidEmail(rawEmail) && isValidBootstrapPassword(rawPassword, isProduction)) {
+      const passwordHash = await hashPassword(rawPassword);
+      await env.DB.prepare(
+        `INSERT OR IGNORE INTO admins (id, name, email, password_hash, role, is_active, created_at, updated_at, last_login_at)
+         VALUES ('adm-root-1', ?, ?, ?, 'super_admin', 1, ?, ?, NULL)`
+      )
+        .bind(adminName, rawEmail, passwordHash, now, now)
+        .run();
+    }
   }
 
-  // 2. Seed Services
+  // 2. Seed Reference Services (ONLY when `services` table is empty)
   const svcCountRow = await env.DB.prepare('SELECT COUNT(*) AS cnt FROM services').first();
-  if (!svcCountRow || Number(svcCountRow.cnt) === 0 || force) {
+  if (!svcCountRow || Number(svcCountRow.cnt) === 0) {
     for (let i = 0; i < SEED_SERVICES.length; i++) {
       const s = SEED_SERVICES[i];
       await env.DB.prepare(
-        `INSERT OR REPLACE INTO services
+        `INSERT OR IGNORE INTO services
          (id, title, slug, order_category, short_description, description, features, technologies, suitable_for, image, icon_name, price, currency, is_active, display_order, created_at, updated_at)
          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, '', ?, ?, 'INR', 1, ?, ?, ?)`
       )
@@ -818,13 +740,13 @@ export async function ensureDatabaseSeeded(env, { force = false } = {}) {
     }
   }
 
-  // 3. Seed Packages
+  // 3. Seed Reference Packages (ONLY when `packages` table is empty)
   const pkgCountRow = await env.DB.prepare('SELECT COUNT(*) AS cnt FROM packages').first();
-  if (!pkgCountRow || Number(pkgCountRow.cnt) === 0 || force) {
+  if (!pkgCountRow || Number(pkgCountRow.cnt) === 0) {
     for (let i = 0; i < SEED_PACKAGES.length; i++) {
       const p = SEED_PACKAGES[i];
       await env.DB.prepare(
-        `INSERT OR REPLACE INTO packages
+        `INSERT OR IGNORE INTO packages
          (id, name, category, description, price, currency, pages_count, features, revisions, delivery_estimate, support_duration, hosting_option, maintenance_option, add_ons, service_id, is_active, is_featured, display_order, created_at, updated_at)
          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
       )
@@ -854,13 +776,13 @@ export async function ensureDatabaseSeeded(env, { force = false } = {}) {
     }
   }
 
-  // 4. Seed Portfolio
+  // 4. Seed Reference Portfolio Items (ONLY when `portfolio` table is empty)
   const portCountRow = await env.DB.prepare('SELECT COUNT(*) AS cnt FROM portfolio').first();
-  if (!portCountRow || Number(portCountRow.cnt) === 0 || force) {
+  if (!portCountRow || Number(portCountRow.cnt) === 0) {
     for (let i = 0; i < SEED_PORTFOLIO.length; i++) {
       const proj = SEED_PORTFOLIO[i];
       await env.DB.prepare(
-        `INSERT OR REPLACE INTO portfolio
+        `INSERT OR IGNORE INTO portfolio
          (id, project_title, slug, short_overview, description, problem_addressed, solution_implemented, category, thumbnail, images, key_features, technologies, project_url, github_url, demo_video_url, status, completion_date, is_sample, is_published, is_featured, display_order, created_at, updated_at)
          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, '', '', ?, ?, ?, ?, ?, ?, ?, ?)`
       )
@@ -891,174 +813,30 @@ export async function ensureDatabaseSeeded(env, { force = false } = {}) {
     }
   }
 
-  // 5. Seed Customers & Orders
-  const ordCountRow = await env.DB.prepare('SELECT COUNT(*) AS cnt FROM orders').first();
-  if (!ordCountRow || Number(ordCountRow.cnt) === 0 || force) {
-    for (let i = 0; i < SEED_ORDERS.length; i++) {
-      const o = SEED_ORDERS[i];
-      const custId = `cust-seed-${i + 1}`;
-      await env.DB.prepare(
-        `INSERT OR REPLACE INTO customers (id, full_name, email, phone, city, business_name, created_at, updated_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
-      )
-        .bind(
-          custId,
-          o.customerName,
-          o.customerEmail,
-          o.customerPhone,
-          o.customerCity,
-          o.businessName,
-          o.createdAt,
-          o.updatedAt
-        )
-        .run();
+  // 5. Seed Default Site Settings (using INSERT OR IGNORE so existing settings are never overwritten)
+  await env.DB.prepare(
+    `INSERT OR IGNORE INTO site_settings (setting_key, setting_value, updated_at) VALUES ('general', ?, ?)`
+  )
+    .bind(JSON.stringify(SEED_SETTINGS), now)
+    .run();
 
-      const matchedSvc = SEED_SERVICES.find(
-        (s) => s.orderCategory === o.serviceName || s.title === o.serviceName
-      );
+  await env.DB.prepare(
+    `INSERT OR IGNORE INTO site_settings (setting_key, setting_value, updated_at) VALUES ('addons', ?, ?)`
+  )
+    .bind(JSON.stringify(SEED_ADDONS), now)
+    .run();
 
-      await env.DB.prepare(
-        `INSERT OR REPLACE INTO orders
-         (id, order_number, customer_id, service_id, package_id, service_name, package_title, project_name, business_name,
-          customer_name, customer_email, customer_phone, customer_city, project_description, required_pages,
-          required_functionality, reference_websites, preferred_design_style, required_integrations, additional_instructions,
-          domain_preference, hosting_preference, hosting_notes, maintenance_interest, maintenance_plan_selected,
-          budget, expected_delivery_date, expected_timeline, urgency, status, quotation_amount, quotation_currency,
-          quotation_notes, customer_update, admin_notes, created_at, updated_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
-      )
-        .bind(
-          o.id,
-          o.orderNumber,
-          custId,
-          matchedSvc ? matchedSvc.id : null,
-          o.packageId,
-          o.serviceName,
-          o.packageTitle,
-          o.projectName,
-          o.businessName,
-          o.customerName,
-          o.customerEmail,
-          o.customerPhone,
-          o.customerCity,
-          o.projectDescription,
-          o.requiredPages,
-          o.requiredFunctionality,
-          o.referenceWebsites,
-          o.preferredDesignStyle,
-          o.requiredIntegrations,
-          o.additionalInstructions,
-          o.domainPreference,
-          o.hostingPreference,
-          o.hostingNotes,
-          o.maintenanceInterest,
-          o.maintenancePlanSelected,
-          o.budget,
-          o.expectedDeliveryDate,
-          o.expectedTimeline,
-          o.urgency,
-          o.status,
-          o.quotationAmount,
-          o.quotationCurrency,
-          o.quotationNotes,
-          o.customerUpdate,
-          o.adminNotes,
-          o.createdAt,
-          o.updatedAt
-        )
-        .run();
+  await env.DB.prepare(
+    `INSERT OR IGNORE INTO site_settings (setting_key, setting_value, updated_at) VALUES ('maintenance_plans', ?, ?)`
+  )
+    .bind(JSON.stringify(SEED_MAINTENANCE_PLANS), now)
+    .run();
 
-      await env.DB.prepare(
-        `INSERT OR REPLACE INTO order_items (id, order_id, item_type, title, description, quantity, unit_price, currency, created_at)
-         VALUES (?, ?, 'package', ?, ?, 1, ?, 'INR', ?)`
-      )
-        .bind(
-          `item-seed-${i + 1}`,
-          o.id,
-          o.packageTitle || o.serviceName,
-          o.projectDescription,
-          o.quotationAmount,
-          o.createdAt
-        )
-        .run();
+  await env.DB.prepare(
+    `INSERT OR IGNORE INTO site_settings (setting_key, setting_value, updated_at) VALUES ('team_members', ?, ?)`
+  )
+    .bind(JSON.stringify(SEED_TEAM), now)
+    .run();
 
-      await env.DB.prepare(
-        `INSERT OR REPLACE INTO order_status_history (id, order_id, previous_status, new_status, changed_by_admin_id, notes, created_at)
-         VALUES (?, ?, 'Pending', ?, 'adm-root-1', ?, ?)`
-      )
-        .bind(`hist-seed-${i + 1}`, o.id, o.status, o.customerUpdate, o.updatedAt)
-        .run();
-    }
-  }
-
-  // 6. Seed Contact Messages
-  const inqCountRow = await env.DB.prepare('SELECT COUNT(*) AS cnt FROM contact_messages').first();
-  if (!inqCountRow || Number(inqCountRow.cnt) === 0 || force) {
-    for (const inq of SEED_INQUIRIES) {
-      await env.DB.prepare(
-        `INSERT OR REPLACE INTO contact_messages (id, name, email, phone, subject, message, status, admin_notes, created_at, updated_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
-      )
-        .bind(
-          inq.id,
-          inq.name,
-          inq.email,
-          inq.phone,
-          inq.subject,
-          inq.message,
-          inq.status,
-          inq.adminNotes,
-          inq.createdAt,
-          inq.createdAt
-        )
-        .run();
-    }
-  }
-
-  // 7. Seed Site Settings
-  const settingsRow = await env.DB.prepare(
-    "SELECT setting_key FROM site_settings WHERE setting_key = 'general'"
-  ).first();
-  if (!settingsRow || force) {
-    await env.DB.prepare(
-      `INSERT OR REPLACE INTO site_settings (setting_key, setting_value, updated_at) VALUES ('general', ?, ?)`
-    )
-      .bind(JSON.stringify(SEED_SETTINGS), now)
-      .run();
-
-    await env.DB.prepare(
-      `INSERT OR REPLACE INTO site_settings (setting_key, setting_value, updated_at) VALUES ('addons', ?, ?)`
-    )
-      .bind(JSON.stringify(SEED_ADDONS), now)
-      .run();
-
-    await env.DB.prepare(
-      `INSERT OR REPLACE INTO site_settings (setting_key, setting_value, updated_at) VALUES ('maintenance_plans', ?, ?)`
-    )
-      .bind(JSON.stringify(SEED_MAINTENANCE_PLANS), now)
-      .run();
-
-    await env.DB.prepare(
-      `INSERT OR REPLACE INTO site_settings (setting_key, setting_value, updated_at) VALUES ('team_members', ?, ?)`
-    )
-      .bind(JSON.stringify(SEED_TEAM), now)
-      .run();
-  }
-
-  seededDatabases.add(env.DB);
-}
-
-export async function resetAndReseedDatabase(env) {
-  await env.DB.prepare('DELETE FROM order_items').run();
-  await env.DB.prepare('DELETE FROM order_status_history').run();
-  await env.DB.prepare('DELETE FROM orders').run();
-  await env.DB.prepare('DELETE FROM customers').run();
-  await env.DB.prepare('DELETE FROM contact_messages').run();
-  await env.DB.prepare('DELETE FROM packages').run();
-  await env.DB.prepare('DELETE FROM services').run();
-  await env.DB.prepare('DELETE FROM portfolio').run();
-  await env.DB.prepare('DELETE FROM site_settings').run();
-
-  seededDatabases.delete(env.DB);
-  await ensureDatabaseSeeded(env, { force: true });
+  initializedDatabases.add(env.DB);
 }

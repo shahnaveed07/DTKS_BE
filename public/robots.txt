@@ -1,8 +1,0 @@
-User-agent: *
-Allow: /
-
-Disallow: /admin/
-Disallow: /track-order
-Disallow: /order-success
-
-Sitemap: https://dreamtechkashmirsolutions.studio/sitemap.xml

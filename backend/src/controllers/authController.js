@@ -1,5 +1,6 @@
 import {
   verifyPassword,
+  verifyPasswordWithMigration,
   hashPassword,
   signJwt,
   generateRandomId,
@@ -65,8 +66,8 @@ export async function loginAdmin(request, env) {
     );
   }
 
-  const passwordValid = await verifyPassword(password, admin.password_hash);
-  if (!passwordValid) {
+  const verification = await verifyPasswordWithMigration(password, admin.password_hash);
+  if (!verification.valid) {
     await logAdminActivity(env, {
       adminId: admin.id,
       action: 'LOGIN_FAILED',
@@ -79,6 +80,29 @@ export async function loginAdmin(request, env) {
   }
 
   const now = new Date().toISOString();
+
+  // Transparently migrate legacy password hashes to canonical $pbkdf2-sha512$v=1$i=100000$...
+  if (verification.needsRehash) {
+    const upgradedHash = await hashPassword(password);
+    await env.DB.prepare(
+      'UPDATE admins SET password_hash = ?, last_login_at = ?, updated_at = ? WHERE id = ?'
+    )
+      .bind(upgradedHash, now, now, admin.id)
+      .run();
+    await logAdminActivity(env, {
+      adminId: admin.id,
+      action: 'PASSWORD_HASH_MIGRATED',
+      entityType: 'Admin',
+      entityId: admin.id,
+      details: 'Migrated password hash to canonical PBKDF2-SHA512 format',
+      request,
+    });
+  } else {
+    await env.DB.prepare('UPDATE admins SET last_login_at = ?, updated_at = ? WHERE id = ?')
+      .bind(now, now, admin.id)
+      .run();
+  }
+
   const accessExp = getAccessExpiresSeconds(env);
   const refreshExp = getRefreshExpiresSeconds(env);
 
@@ -111,10 +135,6 @@ export async function loginAdmin(request, env) {
       expiresAt,
       now
     )
-    .run();
-
-  await env.DB.prepare('UPDATE admins SET last_login_at = ?, updated_at = ? WHERE id = ?')
-    .bind(now, now, admin.id)
     .run();
 
   await logAdminActivity(env, {

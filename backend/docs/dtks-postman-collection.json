@@ -20,6 +20,11 @@
       "key": "refreshToken",
       "value": "",
       "type": "string"
+    },
+    {
+      "key": "adminPassword",
+      "value": "replace-with-your-admin-password",
+      "type": "string"
     }
   ],
   "item": [
@@ -34,7 +39,7 @@
             "url": "{{baseUrl}}/auth/login",
             "body": {
               "mode": "raw",
-              "raw": "{\n  \"email\": \"admin@dreamtechkashmirsolutions.studio\",\n  \"password\": \"Admin@DTKS2026!\"\n}"
+              "raw": "{\n  \"email\": \"admin@dreamtechkashmirsolutions.studio\",\n  \"password\": \"{{adminPassword}}\"\n}"
             }
           }
         },
@@ -69,7 +74,7 @@
             "url": "{{baseUrl}}/auth/change-password",
             "body": {
               "mode": "raw",
-              "raw": "{\n  \"currentPassword\": \"Admin@DTKS2026!\",\n  \"newPassword\": \"NewSecureAdmin@2026!\"\n}"
+              "raw": "{\n  \"currentPassword\": \"{{adminPassword}}\",\n  \"newPassword\": \"NewSecureAdmin@2026!\"\n}"
             }
           }
         },

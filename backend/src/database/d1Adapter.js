@@ -199,19 +199,25 @@ export function createNodeWorkerEnv({
   return {
     DB: db,
     ASSETS_BUCKET: bucket,
+    ENVIRONMENT: process.env.ENVIRONMENT || process.env.NODE_ENV || 'development',
     JWT_SECRET:
       process.env.JWT_SECRET ||
-      'dtks-production-grade-fallback-hmac-secret-2026-kashmir',
-    JWT_ACCESS_EXPIRES_IN: process.env.JWT_ACCESS_EXPIRES_IN || '3600',
+      'dtks-local-dev-only-ephemeral-hmac-secret-key-2026',
+    JWT_ACCESS_EXPIRES_IN: process.env.JWT_ACCESS_EXPIRES_IN || '900',
     JWT_REFRESH_EXPIRES_IN: process.env.JWT_REFRESH_EXPIRES_IN || '604800',
-    INITIAL_ADMIN_NAME: process.env.INITIAL_ADMIN_NAME || 'DTKS Principal Administrator',
+    INITIAL_ADMIN_NAME:
+      process.env.INITIAL_ADMIN_NAME ||
+      process.env.ADMIN_INITIAL_NAME ||
+      'DTKS Principal Administrator',
     INITIAL_ADMIN_EMAIL:
-      process.env.INITIAL_ADMIN_EMAIL || 'admin@dreamtechkashmirsolutions.studio',
-    INITIAL_ADMIN_PASSWORD: process.env.INITIAL_ADMIN_PASSWORD || 'Admin@DTKS2026!',
+      process.env.INITIAL_ADMIN_EMAIL || process.env.ADMIN_INITIAL_EMAIL || '',
+    INITIAL_ADMIN_PASSWORD:
+      process.env.INITIAL_ADMIN_PASSWORD || process.env.ADMIN_INITIAL_PASSWORD || '',
     CORS_ALLOWED_ORIGINS:
       process.env.CORS_ALLOWED_ORIGINS ||
-      'https://dreamtechkashmirsolutions.studio,https://www.dreamtechkashmirsolutions.studio,http://localhost:3000',
-    EMAIL_PROVIDER_API_KEY: process.env.EMAIL_PROVIDER_API_KEY || '',
+      'https://dreamtechkashmirsolutions.studio,https://www.dreamtechkashmirsolutions.studio,http://localhost:3000,http://localhost:5173',
+    RESEND_API_KEY:
+      process.env.RESEND_API_KEY || process.env.EMAIL_PROVIDER_API_KEY || '',
     EMAIL_FROM_ADDRESS:
       process.env.EMAIL_FROM_ADDRESS || 'notifications@dreamtechkashmirsolutions.studio',
     ADMIN_NOTIFICATION_EMAIL:

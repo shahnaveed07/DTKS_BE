@@ -1,31 +1,35 @@
 import { logAdminActivity } from './auditService.js';
 
 /**
- * Optional Configurable Email Notification Service (Phase 6)
+ * Configurable Transactional Email Notification Service (Resend HTTP API)
  *
- * Customer notifications:
- *   - Order received (`notifyOrderCreated`)
- *   - Order status updated (`notifyOrderStatusUpdated`)
+ * Standardized Secret Name:
+ *   - `RESEND_API_KEY` (also accepts legacy alias `EMAIL_PROVIDER_API_KEY`)
+ *   - `EMAIL_FROM_ADDRESS` (default: `notifications@dreamtechkashmirsolutions.studio`)
+ *   - `ADMIN_NOTIFICATION_EMAIL` (default: `contact@dreamtechkashmirsolutions.studio`)
  *
- * Admin notifications:
- *   - New order received (`notifyOrderCreated`)
- *   - New contact message received (`notifyContactSubmitted`)
- *
- * Core order and contact functionality always continues working even when email
- * provider credentials are unavailable or an upstream delivery error occurs.
+ * Non-Blocking Guarantee:
+ *   Core order and contact workflows always succeed even if `RESEND_API_KEY` is unconfigured
+ *   or the upstream email API returns an error. All dispatch outcomes are recorded in `activity_logs`.
  */
 
-async function dispatchEmail(
+export async function dispatchEmail(
   env,
   { recipientEmail, recipientType, subject, bodyText, eventType, relatedEntityId }
 ) {
-  const apiKey = env.EMAIL_PROVIDER_API_KEY || '';
-  const fromAddress = env.EMAIL_FROM_ADDRESS || 'notifications@dreamtechkashmirsolutions.studio';
+  const apiKey = (env?.RESEND_API_KEY || env?.EMAIL_PROVIDER_API_KEY || '').trim();
+  const fromAddress = env?.EMAIL_FROM_ADDRESS || 'notifications@dreamtechkashmirsolutions.studio';
 
   let status = 'skipped_unconfigured';
-  let detailMessage = 'EMAIL_PROVIDER_API_KEY not configured; skipped live dispatch';
+  let detailMessage = 'RESEND_API_KEY not configured; skipped live dispatch';
 
-  if (apiKey && recipientEmail && !recipientEmail.endsWith('.example')) {
+  if (
+    apiKey &&
+    !apiKey.startsWith('re_replace_') &&
+    recipientEmail &&
+    !recipientEmail.endsWith('.example') &&
+    !recipientEmail.endsWith('@example.com')
+  ) {
     try {
       const response = await fetch('https://api.resend.com/emails', {
         method: 'POST',
@@ -45,18 +49,19 @@ async function dispatchEmail(
         status = 'sent';
         detailMessage = `Dispatched email to ${recipientEmail}`;
       } else {
+        const errBody = await response.text().catch(() => '');
         status = 'failed';
-        detailMessage = `Email provider returned HTTP ${response.status}`;
+        detailMessage = `Resend API returned HTTP ${response.status}${errBody ? `: ${errBody.slice(0, 200)}` : ''}`;
       }
     } catch (err) {
       status = 'failed';
-      detailMessage = err?.message || 'Network error while contacting email provider';
+      detailMessage = err?.message || 'Network error while contacting Resend API';
     }
   }
 
   await logAdminActivity(env, {
     adminId: null,
-    action: `EMAIL_${eventType}`,
+    action: `EMAIL_NOTIFICATION_${eventType}`,
     entityType: recipientType === 'admin' ? 'AdminNotification' : 'CustomerNotification',
     entityId: relatedEntityId || '',
     details: JSON.stringify({
@@ -67,11 +72,11 @@ async function dispatchEmail(
     }),
   });
 
-  return { status };
+  return { status, detailMessage };
 }
 
 export async function notifyOrderCreated(env, order) {
-  const adminEmail = env.ADMIN_NOTIFICATION_EMAIL || 'contact@dreamtechkashmirsolutions.studio';
+  const adminEmail = env?.ADMIN_NOTIFICATION_EMAIL || 'contact@dreamtechkashmirsolutions.studio';
   const orderNumber = order.orderNumber || order.order_number || order.referenceId;
 
   // 1. Customer confirmation notification
@@ -142,7 +147,7 @@ export async function notifyOrderStatusUpdated(env, order, previousStatus) {
 }
 
 export async function notifyContactSubmitted(env, inquiry) {
-  const adminEmail = env.ADMIN_NOTIFICATION_EMAIL || 'contact@dreamtechkashmirsolutions.studio';
+  const adminEmail = env?.ADMIN_NOTIFICATION_EMAIL || 'contact@dreamtechkashmirsolutions.studio';
 
   await dispatchEmail(env, {
     recipientEmail: adminEmail,

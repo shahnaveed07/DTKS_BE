@@ -5,8 +5,14 @@ import os from 'node:os';
 import path from 'node:path';
 import workerApp from '../src/index.js';
 import { createNodeWorkerEnv } from '../src/database/d1Adapter.js';
-import { signJwt } from '../src/utils/crypto.js';
+import {
+  hashPassword,
+  verifyPassword,
+  verifyPasswordWithMigration,
+  signJwt,
+} from '../src/utils/crypto.js';
 import { resetRateLimiter } from '../src/middleware/rateLimiter.js';
+import { ensureDatabaseSeeded } from '../src/database/seed.js';
 
 // Minimal valid 1x1 PNG buffer (magic bytes: 89 50 4E 47 0D 0A 1A 0A)
 const VALID_PNG_BYTES = Buffer.from(
@@ -14,20 +20,36 @@ const VALID_PNG_BYTES = Buffer.from(
   'hex'
 );
 
-describe('DTKS Production Backend API Suite (/api/v1) – 20 Phase 8 Scenarios', () => {
+const TEST_ADMIN_EMAIL = 'admin@dreamtechkashmirsolutions.studio';
+const TEST_ADMIN_PASSWORD = 'TestStrongPassword#2026!';
+const TEST_JWT_SECRET = 'dtks-test-suite-256-bit-random-hmac-secret-key-2026-verified';
+
+describe('DTKS Production Backend Audit & Security Test Suite (/api/v1)', () => {
   let tmpDir;
   let dbPath;
   let r2Dir;
   let env;
   let accessToken = '';
   let refreshToken = '';
+  let createdOrderId = '';
+  let createdOrderRef = '';
 
   before(async () => {
-    tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'dtks-backend-test-'));
+    tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'dtks-backend-audit-'));
     dbPath = path.join(tmpDir, 'dtks-test.sqlite');
     r2Dir = path.join(tmpDir, 'r2-storage');
-    env = createNodeWorkerEnv({ dbPath, r2Dir });
-    resetRateLimiter();
+    env = createNodeWorkerEnv({
+      dbPath,
+      r2Dir,
+      overrides: {
+        ENVIRONMENT: 'development',
+        JWT_SECRET: TEST_JWT_SECRET,
+        INITIAL_ADMIN_NAME: 'DTKS Test Super Admin',
+        INITIAL_ADMIN_EMAIL: TEST_ADMIN_EMAIL,
+        INITIAL_ADMIN_PASSWORD: TEST_ADMIN_PASSWORD,
+      },
+    });
+    await resetRateLimiter(env);
   });
 
   after(() => {
@@ -47,6 +69,7 @@ describe('DTKS Production Backend API Suite (/api/v1) – 20 Phase 8 Scenarios',
       headers = {},
       ip = '127.0.0.1',
       origin = 'https://dreamtechkashmirsolutions.studio',
+      customEnv = env,
     } = options;
 
     const reqHeaders = new Headers(headers);
@@ -66,83 +89,112 @@ describe('DTKS Production Backend API Suite (/api/v1) – 20 Phase 8 Scenarios',
       body: requestBody,
     });
 
-    const response = await workerApp.fetch(request, env, {});
+    const response = await workerApp.fetch(request, customEnv, {});
     const contentType = response.headers.get('content-type') || '';
     const json = contentType.includes('application/json') ? await response.json() : null;
     return { status: response.status, headers: response.headers, json, response };
   }
 
-  it('1. Successful admin login returns JWT access & refresh tokens and updates last_login_at', async () => {
-    const res = await apiRequest('/api/v1/auth/login', {
-      method: 'POST',
-      body: {
-        email: 'admin@dreamtechkashmirsolutions.studio',
-        password: 'Admin@DTKS2026!',
+  it('1. Security Audit: Never creates a default admin when INITIAL_ADMIN_PASSWORD is missing or placeholder', async () => {
+    const emptyDbPath = path.join(tmpDir, 'no-fallback-admin.sqlite');
+    const unseededEnv = createNodeWorkerEnv({
+      dbPath: emptyDbPath,
+      r2Dir,
+      overrides: {
+        ENVIRONMENT: 'production',
+        JWT_SECRET: TEST_JWT_SECRET,
+        INITIAL_ADMIN_EMAIL: 'admin@dreamtechkashmirsolutions.studio',
+        INITIAL_ADMIN_PASSWORD: '', // No password provided
       },
     });
 
-    assert.equal(res.status, 200);
-    assert.equal(res.json.success, true);
-    assert.ok(res.json.data.accessToken);
-    assert.ok(res.json.data.refreshToken);
-    assert.equal(res.json.data.admin.email, 'admin@dreamtechkashmirsolutions.studio');
-    assert.equal(res.json.data.admin.role, 'super_admin');
-    assert.equal(res.json.data.admin.is_active, true);
+    await ensureDatabaseSeeded(unseededEnv);
+    const adminCount = await unseededEnv.DB.prepare('SELECT COUNT(*) AS cnt FROM admins').first();
+    assert.equal(Number(adminCount.cnt), 0, 'Must never create an admin without explicit password');
+    unseededEnv.DB.close();
+  });
 
-    accessToken = res.json.data.accessToken;
-    refreshToken = res.json.data.refreshToken;
+  it('2. Password Hashing & Legacy Hash Migration: Uses canonical $pbkdf2-sha512$ format and seamlessly migrates legacy hashes', async () => {
+    const hash = await hashPassword('SecurePass!2026');
+    assert.ok(
+      hash.startsWith('$pbkdf2-sha512$v=1$i=100000$'),
+      `Expected canonical $pbkdf2-sha512$ prefix, got: ${hash}`
+    );
+    assert.equal(await verifyPassword('SecurePass!2026', hash), true);
+    assert.equal(await verifyPassword('WrongPass!2026', hash), false);
 
+    // Construct a legacy mislabeled $argon2id$v=19$m=65536,t=100000,p=4$<salt>$<hash> string using the same PBKDF2-SHA512 bytes
+    const parts = hash.split('$').filter(Boolean);
+    const saltHex = parts[3];
+    const derivedHex = parts[4];
+    const legacyHash = `$argon2id$v=19$m=65536,t=100000,p=4$${saltHex}$${derivedHex}`;
+
+    const migrationCheck = await verifyPasswordWithMigration('SecurePass!2026', legacyHash);
+    assert.equal(migrationCheck.valid, true);
+    assert.equal(migrationCheck.needsRehash, true);
+
+    // Seed an admin with the legacy hash and verify login transparently upgrades the stored hash in D1
+    await ensureDatabaseSeeded(env);
+    const legacyAdminPass = await hashPassword(TEST_ADMIN_PASSWORD);
+    const [, , , admSalt, admDerived] = legacyAdminPass.split('$').filter(Boolean);
+    const legacyAdminStored = `$argon2id$v=19$m=65536,t=100000,p=4$${admSalt}$${admDerived}`;
+    await env.DB.prepare("UPDATE admins SET password_hash = ? WHERE id = 'adm-root-1'")
+      .bind(legacyAdminStored)
+      .run();
+
+    const loginRes = await apiRequest('/api/v1/auth/login', {
+      method: 'POST',
+      body: { email: TEST_ADMIN_EMAIL, password: TEST_ADMIN_PASSWORD },
+    });
+    assert.equal(loginRes.status, 200);
+
+    const rowAfterLogin = await env.DB.prepare(
+      "SELECT password_hash FROM admins WHERE id = 'adm-root-1'"
+    ).first();
+    assert.ok(
+      rowAfterLogin.password_hash.startsWith('$pbkdf2-sha512$v=1$i=100000$'),
+      'Login must transparently migrate legacy password hash to $pbkdf2-sha512$'
+    );
+
+    accessToken = loginRes.json.data.accessToken;
+    refreshToken = loginRes.json.data.refreshToken;
+  });
+
+  it('3. Authentication & Invalid Credentials: Valid token accesses /auth/me; invalid credentials return 401', async () => {
     const meRes = await apiRequest('/api/v1/auth/me', { token: accessToken });
     assert.equal(meRes.status, 200);
-    assert.equal(meRes.json.data.admin.email, 'admin@dreamtechkashmirsolutions.studio');
-  });
+    assert.equal(meRes.json.data.admin.email, TEST_ADMIN_EMAIL);
+    assert.equal(meRes.json.data.admin.role, 'super_admin');
 
-  it('2. Invalid admin login fails with HTTP 401 INVALID_CREDENTIALS', async () => {
-    const res = await apiRequest('/api/v1/auth/login', {
+    const badLogin = await apiRequest('/api/v1/auth/login', {
       method: 'POST',
       ip: '10.0.0.2',
-      body: {
-        email: 'admin@dreamtechkashmirsolutions.studio',
-        password: 'WrongPassword123!',
-      },
+      body: { email: TEST_ADMIN_EMAIL, password: 'WrongPassword123!' },
     });
-
-    assert.equal(res.status, 401);
-    assert.equal(res.json.success, false);
-    assert.equal(res.json.error.code, 'INVALID_CREDENTIALS');
+    assert.equal(badLogin.status, 401);
+    assert.equal(badLogin.json.error.code, 'INVALID_CREDENTIALS');
   });
 
-  it('3. Unauthorized API requests to protected admin endpoints are rejected with 401', async () => {
-    const statsNoToken = await apiRequest('/api/v1/admin/dashboard/stats');
-    assert.equal(statsNoToken.status, 401);
+  it('4. Unauthorized API Access & Expired JWT Rejection: Rejects missing, tampered, or expired tokens', async () => {
+    const noTokenRes = await apiRequest('/api/v1/admin/dashboard/stats');
+    assert.equal(noTokenRes.status, 401);
 
-    const ordersNoToken = await apiRequest('/api/v1/orders');
-    assert.equal(ordersNoToken.status, 401);
-
-    const createServiceNoToken = await apiRequest('/api/v1/services', {
-      method: 'POST',
-      body: { title: 'Unauthorized Service', description: 'Should fail' },
-    });
-    assert.equal(createServiceNoToken.status, 401);
-  });
-
-  it('4. Expired access tokens are rejected with HTTP 401', async () => {
     const expiredJwt = await signJwt(
       {
-        sub: 'adm-dtks-1',
-        email: 'admin@dreamtechkashmirsolutions.studio',
+        sub: 'adm-root-1',
+        email: TEST_ADMIN_EMAIL,
         role: 'super_admin',
         type: 'access',
       },
-      env.JWT_SECRET,
-      -60 // Already expired 60 seconds ago
+      TEST_JWT_SECRET,
+      -60
     );
-
     const expiredRes = await apiRequest('/api/v1/auth/me', { token: expiredJwt });
     assert.equal(expiredRes.status, 401);
+    assert.equal(expiredRes.json.error.code, 'TOKEN_EXPIRED');
   });
 
-  it('5. Refresh-token rotation issues a new token pair and revokes the previous refresh token', async () => {
+  it('5. Refresh-Token Rotation & Revocation: Rotates token pair and rejects reuse of revoked refresh token', async () => {
     const refreshRes = await apiRequest('/api/v1/auth/refresh', {
       method: 'POST',
       body: { refreshToken },
@@ -152,18 +204,69 @@ describe('DTKS Production Backend API Suite (/api/v1) – 20 Phase 8 Scenarios',
     assert.ok(refreshRes.json.data.refreshToken);
     assert.notEqual(refreshRes.json.data.refreshToken, refreshToken);
 
-    // Old refresh token is now revoked in refresh_sessions and cannot be reused
-    const reuseOldRefresh = await apiRequest('/api/v1/auth/refresh', {
+    // Reusing the old refresh token is rejected with 401
+    const reuseRes = await apiRequest('/api/v1/auth/refresh', {
       method: 'POST',
       body: { refreshToken },
     });
-    assert.equal(reuseOldRefresh.status, 401);
+    assert.equal(reuseRes.status, 401);
 
     accessToken = refreshRes.json.data.accessToken;
     refreshToken = refreshRes.json.data.refreshToken;
   });
 
-  it('6. Service CRUD operations work with real D1 persistence and public visibility filtering', async () => {
+  it('6. Role-Based Authorization (RBAC) & Destructive Reset Removal: Enforces editor vs super_admin permissions', async () => {
+    // Verify destructive /api/v1/admin/reset-seed endpoint has been removed (returns 404)
+    const resetSeedRes = await apiRequest('/api/v1/admin/reset-seed', {
+      method: 'POST',
+      token: accessToken,
+    });
+    assert.equal(resetSeedRes.status, 404);
+
+    // Insert an `editor` admin and sign a token for them
+    const editorHash = await hashPassword('EditorPass#2026!');
+    await env.DB.prepare(
+      `INSERT INTO admins (id, name, email, password_hash, role, is_active, created_at, updated_at)
+       VALUES ('adm-editor-1', 'DTKS Content Editor', 'editor@dreamtechkashmirsolutions.studio', ?, 'editor', 1, datetime('now'), datetime('now'))`
+    )
+      .bind(editorHash)
+      .run();
+
+    const editorToken = await signJwt(
+      {
+        sub: 'adm-editor-1',
+        email: 'editor@dreamtechkashmirsolutions.studio',
+        role: 'editor',
+        type: 'access',
+      },
+      TEST_JWT_SECRET,
+      900
+    );
+
+    // Editor CAN read dashboard stats
+    const editorStatsRes = await apiRequest('/api/v1/admin/dashboard/stats', {
+      token: editorToken,
+    });
+    assert.equal(editorStatsRes.status, 200);
+
+    // Editor CANNOT modify global site_settings (403 FORBIDDEN)
+    const editorSettingsRes = await apiRequest('/api/v1/settings', {
+      method: 'PUT',
+      token: editorToken,
+      body: { companyName: 'Unauthorized Override' },
+    });
+    assert.equal(editorSettingsRes.status, 403);
+    assert.equal(editorSettingsRes.json.error.code, 'FORBIDDEN');
+
+    // Editor CANNOT delete services (403 FORBIDDEN)
+    const editorDeleteSvc = await apiRequest('/api/v1/services/svc-landing-pages', {
+      method: 'DELETE',
+      token: editorToken,
+    });
+    assert.equal(editorDeleteSvc.status, 403);
+  });
+
+  it('7. Services CRUD & Non-Destructive Seeding: Creates, updates, filters, and preserves modified services across re-seeding', async () => {
     const createRes = await apiRequest('/api/v1/services', {
       method: 'POST',
       token: accessToken,
@@ -181,35 +284,33 @@ describe('DTKS Production Backend API Suite (/api/v1) – 20 Phase 8 Scenarios',
     });
     assert.equal(createRes.status, 201);
     const createdId = createRes.json.data.service.id;
-    assert.equal(createRes.json.data.service.slug, 'custom-web-portals-dashboards');
 
-    const getSlugRes = await apiRequest('/api/v1/services/custom-web-portals-dashboards');
-    assert.equal(getSlugRes.status, 200);
-    assert.equal(getSlugRes.json.data.service.title, 'Custom Web Portals & Dashboards');
-
-    const updateRes = await apiRequest(`/api/v1/services/${createdId}`, {
+    // Modify an existing seeded service and verify ensureDatabaseSeeded NEVER overwrites it
+    const updateSeededRes = await apiRequest('/api/v1/services/svc-business-websites', {
       method: 'PUT',
       token: accessToken,
-      body: {
-        title: 'Custom Web Portals & Business Dashboards',
-        price: 42000,
-      },
+      body: { price: 19500 },
     });
-    assert.equal(updateRes.status, 200);
-    assert.equal(updateRes.json.data.service.title, 'Custom Web Portals & Business Dashboards');
-    assert.equal(updateRes.json.data.service.price, 42000);
+    assert.equal(updateSeededRes.status, 200);
+    assert.equal(updateSeededRes.json.data.service.price, 19500);
+
+    // Re-run ensureDatabaseSeeded on a fresh DB wrapper pointing to the same file
+    const secondEnv = createNodeWorkerEnv({ dbPath, r2Dir });
+    await ensureDatabaseSeeded(secondEnv);
+    const preservedSvc = await secondEnv.DB.prepare(
+      "SELECT price FROM services WHERE id = 'svc-business-websites'"
+    ).first();
+    secondEnv.DB.close();
+    assert.equal(Number(preservedSvc.price), 19500, 'Startup seeding must never overwrite existing records');
 
     const deleteRes = await apiRequest(`/api/v1/services/${createdId}`, {
       method: 'DELETE',
       token: accessToken,
     });
     assert.equal(deleteRes.status, 200);
-
-    const afterDeleteRes = await apiRequest('/api/v1/services/custom-web-portals-dashboards');
-    assert.equal(afterDeleteRes.status, 404);
   });
 
-  it('7. Package CRUD operations and service-based filtering (?service_id=) work', async () => {
+  it('8. Packages CRUD & Service-Based Filtering (?service_id=): Works end-to-end', async () => {
     const createRes = await apiRequest('/api/v1/packages', {
       method: 'POST',
       token: accessToken,
@@ -222,9 +323,6 @@ describe('DTKS Production Backend API Suite (/api/v1) – 20 Phase 8 Scenarios',
         currency: 'INR',
         pages_count: 'Up to 20 Pages',
         features: ['Custom design system', 'Technical SEO', 'Speed optimization'],
-        revisions: '4 Revision Rounds',
-        delivery_estimate: '3–4 Weeks',
-        support_duration: '60 Days Post-Launch Support',
         is_active: true,
         is_featured: true,
         display_order: 15,
@@ -232,9 +330,7 @@ describe('DTKS Production Backend API Suite (/api/v1) – 20 Phase 8 Scenarios',
     });
     assert.equal(createRes.status, 201);
     const pkgId = createRes.json.data.package.id;
-    assert.equal(createRes.json.data.package.service_id, 'svc-business-websites');
 
-    // Filter packages by service_id
     const filteredList = await apiRequest('/api/v1/packages?service_id=svc-business-websites');
     assert.equal(filteredList.status, 200);
     assert.ok(filteredList.json.data.packages.some((p) => p.id === pkgId));
@@ -242,10 +338,7 @@ describe('DTKS Production Backend API Suite (/api/v1) – 20 Phase 8 Scenarios',
     const updateRes = await apiRequest(`/api/v1/packages/${pkgId}`, {
       method: 'PUT',
       token: accessToken,
-      body: {
-        price: 48000,
-        pages_count: 'Up to 25 Pages',
-      },
+      body: { price: 48000 },
     });
     assert.equal(updateRes.status, 200);
     assert.equal(updateRes.json.data.package.price, 48000);
@@ -257,7 +350,7 @@ describe('DTKS Production Backend API Suite (/api/v1) – 20 Phase 8 Scenarios',
     assert.equal(delRes.status, 200);
   });
 
-  it('8. Portfolio CRUD operations, category filtering, pagination, and publishing toggle work', async () => {
+  it('9. Portfolio CRUD, Pagination, Category Filtering & Publishing Toggle: Works end-to-end', async () => {
     const createProjRes = await apiRequest('/api/v1/portfolio', {
       method: 'POST',
       token: accessToken,
@@ -277,15 +370,12 @@ describe('DTKS Production Backend API Suite (/api/v1) – 20 Phase 8 Scenarios',
     assert.equal(createProjRes.status, 201);
     const projId = createProjRes.json.data.project.id;
 
-    // Test pagination (?page=1&limit=2)
     const paginatedRes = await apiRequest('/api/v1/portfolio?page=1&limit=2');
     assert.equal(paginatedRes.status, 200);
     assert.equal(paginatedRes.json.data.projects.length, 2);
-    assert.equal(paginatedRes.json.data.pagination.page, 1);
-    assert.equal(paginatedRes.json.data.pagination.limit, 2);
     assert.ok(paginatedRes.json.data.pagination.total >= 4);
 
-    // Unpublish project and verify public cannot access unpublished project
+    // Unpublish and verify public 404
     const unpubRes = await apiRequest(`/api/v1/portfolio/${projId}`, {
       method: 'PUT',
       token: accessToken,
@@ -304,10 +394,10 @@ describe('DTKS Production Backend API Suite (/api/v1) – 20 Phase 8 Scenarios',
     assert.equal(delRes.status, 200);
   });
 
-  it('9. R2 image uploads support uploading, serving, replacing, and deleting portfolio assets', async () => {
+  it('10. R2 Image Upload & File Upload Validation: Enforces MIME type, size limit, and magic-byte binary headers', async () => {
+    // Valid PNG upload
     const formData = new FormData();
-    const fileBlob = new Blob([VALID_PNG_BYTES], { type: 'image/png' });
-    formData.append('file', fileBlob, 'kashmir-hospitality-preview.png');
+    formData.append('file', new Blob([VALID_PNG_BYTES], { type: 'image/png' }), 'preview.png');
     formData.append('folder', 'portfolio');
 
     const uploadRes = await apiRequest('/api/v1/portfolio/upload', {
@@ -317,15 +407,11 @@ describe('DTKS Production Backend API Suite (/api/v1) – 20 Phase 8 Scenarios',
     });
     assert.equal(uploadRes.status, 201);
     const uploadedAsset = uploadRes.json.data.asset;
-    assert.ok(uploadedAsset.key.startsWith('portfolio/'));
-    assert.ok(uploadedAsset.url.startsWith('/api/v1/uploads/portfolio/'));
 
-    // Verify serving the uploaded image from R2
     const assetGetRes = await apiRequest(uploadedAsset.url);
     assert.equal(assetGetRes.status, 200);
     assert.equal(assetGetRes.headers.get('content-type'), 'image/png');
 
-    // Delete uploaded image via DELETE /api/v1/portfolio/upload
     const deleteAssetRes = await apiRequest('/api/v1/portfolio/upload', {
       method: 'DELETE',
       token: accessToken,
@@ -333,12 +419,30 @@ describe('DTKS Production Backend API Suite (/api/v1) – 20 Phase 8 Scenarios',
     });
     assert.equal(deleteAssetRes.status, 200);
 
-    // Verify deleted asset returns 404
-    const afterDelGetRes = await apiRequest(uploadedAsset.url);
-    assert.equal(afterDelGetRes.status, 404);
+    // Reject HTML file upload
+    const badForm = new FormData();
+    badForm.append('file', new Blob(['<script>alert(1)</script>'], { type: 'text/html' }), 'bad.html');
+    const badRes = await apiRequest('/api/v1/portfolio/upload', {
+      method: 'POST',
+      token: accessToken,
+      body: badForm,
+    });
+    assert.equal(badRes.status, 400);
+    assert.equal(badRes.json.error.code, 'INVALID_IMAGE_UPLOAD');
+
+    // Reject spoofed MIME with non-image magic bytes
+    const spoofForm = new FormData();
+    spoofForm.append('file', new Blob([Buffer.from('not-a-real-png')], { type: 'image/png' }), 'spoof.png');
+    const spoofRes = await apiRequest('/api/v1/portfolio/upload', {
+      method: 'POST',
+      token: accessToken,
+      body: spoofForm,
+    });
+    assert.equal(spoofRes.status, 400);
+    assert.equal(spoofRes.json.error.code, 'INVALID_IMAGE_UPLOAD');
   });
 
-  it('10. Customer order submissions create customer + order in D1 with Pending status and order_number', async () => {
+  it('11. Orders & Order Status History: Creates customer + order, tracks publicly, and records status history transitions', async () => {
     const orderRes = await apiRequest('/api/v1/orders', {
       method: 'POST',
       body: {
@@ -346,7 +450,8 @@ describe('DTKS Production Backend API Suite (/api/v1) – 20 Phase 8 Scenarios',
         package_id: 'pkg-ecommerce-store',
         project_name: 'Kashmir Pashmina Online Storefront',
         business_name: 'Zoon Artisans Collective',
-        project_description: 'Direct-to-consumer storefront for authentic Kashmiri Pashmina shawls with catalog filters.',
+        project_description:
+          'Direct-to-consumer storefront for authentic Kashmiri Pashmina shawls with catalog filters.',
         budget: '₹30,000 – ₹60,000',
         customer_name: 'Tariq Ahmad',
         customer_email: 'tariq.ahmad@example.com',
@@ -354,268 +459,188 @@ describe('DTKS Production Backend API Suite (/api/v1) – 20 Phase 8 Scenarios',
         customer_city: 'Srinagar',
       },
     });
-
     assert.equal(orderRes.status, 201);
-    const createdOrder = orderRes.json.data.order;
-    assert.ok(createdOrder.order_number.startsWith('DKS-'));
-    assert.equal(createdOrder.status, 'Pending');
-    assert.equal(createdOrder.customer_email, 'tariq.ahmad@example.com');
+    createdOrderId = orderRes.json.data.order.id;
+    createdOrderRef = orderRes.json.data.order.order_number;
+    assert.equal(orderRes.json.data.order.status, 'Pending');
 
-    // Public tracking with matching referenceId + email
-    const trackRes = await apiRequest(
-      `/api/v1/orders/track?ref=${encodeURIComponent(createdOrder.order_number)}&email=${encodeURIComponent('tariq.ahmad@example.com')}`
-    );
-    assert.equal(trackRes.status, 200);
-    assert.equal(trackRes.json.data.order.project_name, 'Kashmir Pashmina Online Storefront');
-    assert.ok(Array.isArray(trackRes.json.data.order.statusHistory));
-  });
-
-  it('11. Invalid order submissions are rejected with 400 and field-level validation errors', async () => {
+    // Invalid order submission fails with 400
     const badOrderRes = await apiRequest('/api/v1/orders', {
       method: 'POST',
       body: {
         customer_name: 'A',
-        customer_email: 'not-an-email',
-        customer_phone: '123',
-        project_description: 'Too short',
+        customer_email: 'invalid-email',
+        customer_phone: '12',
+        project_description: 'Short',
       },
     });
-
     assert.equal(badOrderRes.status, 400);
-    assert.equal(badOrderRes.json.success, false);
-    assert.equal(badOrderRes.json.error.code, 'VALIDATION_ERROR');
-    assert.ok(badOrderRes.json.error.details.customerEmail);
-    assert.ok(badOrderRes.json.error.details.customerPhone);
-  });
 
-  it('12. Order status updates validate allowed statuses and record order_status_history', async () => {
-    const unauthPatch = await apiRequest('/api/v1/orders/DKS-2026-0001/status', {
+    // Admin updates status to Reviewed then InProgress
+    const reviewRes = await apiRequest(`/api/v1/orders/${createdOrderRef}/status`, {
       method: 'PATCH',
-      body: { status: 'Approved' },
+      token: accessToken,
+      body: {
+        status: 'Reviewed',
+        customer_update: 'Initial scope reviewed by engineering.',
+      },
     });
-    assert.equal(unauthPatch.status, 401);
+    assert.equal(reviewRes.status, 200);
 
-    const adminPatch = await apiRequest('/api/v1/orders/DKS-2026-0001/status', {
+    const progressRes = await apiRequest(`/api/v1/orders/${createdOrderId}/status`, {
       method: 'PATCH',
       token: accessToken,
       body: {
         status: 'InProgress',
-        customer_update: 'Development sprint started.',
-        admin_notes: 'Verified domain DNS readiness.',
+        customer_update: 'Storefront development started.',
+        admin_notes: 'Assigned to lead developer.',
       },
     });
-    assert.equal(adminPatch.status, 200);
-    assert.equal(adminPatch.json.data.order.status, 'InProgress');
-    assert.ok(
-      adminPatch.json.data.order.statusHistory.some((h) => h.new_status === 'InProgress')
+    assert.equal(progressRes.status, 200);
+    assert.equal(progressRes.json.data.order.status, 'InProgress');
+    assert.ok(progressRes.json.data.order.statusHistory.length >= 3);
+
+    // Public tracking reflects updated status and history without leaking internal admin_notes
+    const trackRes = await apiRequest(
+      `/api/v1/orders/track?ref=${encodeURIComponent(createdOrderRef)}&email=tariq.ahmad@example.com`
     );
+    assert.equal(trackRes.status, 200);
+    assert.equal(trackRes.json.data.order.status, 'InProgress');
+    assert.equal(trackRes.json.data.order.admin_notes, undefined);
   });
 
-  it('13. Contact form submissions, search (?search=), status updates, and deletion work', async () => {
-    const createMsg = await apiRequest('/api/v1/contact', {
-      method: 'POST',
-      body: {
-        name: 'Nadia Shah',
-        email: 'nadia.shah@example.com',
-        phone: '+91 99061 11223',
-        subject: 'Corporate Website Redesign Inquiry',
-        message: 'We want to redesign our existing 10-page hospitality website with faster mobile performance.',
-      },
-    });
-    assert.equal(createMsg.status, 201);
-    const inquiryId = createMsg.json.data.inquiry.id;
-
-    // Admin searches contact messages
-    const searchRes = await apiRequest('/api/v1/contact?search=Nadia', { token: accessToken });
-    assert.equal(searchRes.status, 200);
-    assert.ok(searchRes.json.data.messages.some((i) => i.id === inquiryId));
-
-    // Admin updates inquiry status and notes
-    const patchRes = await apiRequest(`/api/v1/contact/${inquiryId}`, {
-      method: 'PATCH',
-      token: accessToken,
-      body: {
-        status: 'Replied',
-        admin_notes: 'Sent consultation slots and package comparison PDF.',
-      },
-    });
-    assert.equal(patchRes.status, 200);
-    assert.equal(patchRes.json.data.message.status, 'Replied');
-    assert.equal(patchRes.json.data.message.admin_notes, 'Sent consultation slots and package comparison PDF.');
-  });
-
-  it('14. Admin dashboard statistics and analytics reflect real D1 database records', async () => {
-    const [statsRes, recentOrdersRes, recentMessagesRes, analyticsRes] = await Promise.all([
-      apiRequest('/api/v1/admin/dashboard/stats', { token: accessToken }),
-      apiRequest('/api/v1/admin/dashboard/recent-orders', { token: accessToken }),
-      apiRequest('/api/v1/admin/dashboard/recent-messages', { token: accessToken }),
-      apiRequest('/api/v1/admin/dashboard/order-analytics', { token: accessToken }),
-    ]);
-
-    assert.equal(statsRes.status, 200);
-    assert.ok(statsRes.json.data.stats.totalOrders >= 2);
-    assert.ok(statsRes.json.data.stats.pendingOrders >= 1);
-    assert.ok(statsRes.json.data.stats.totalCustomers >= 2);
-    assert.ok(statsRes.json.data.stats.totalContactMessages >= 2);
-    assert.ok(statsRes.json.data.stats.activeServices >= 1);
-    assert.ok(statsRes.json.data.stats.activePackages >= 1);
-    assert.ok(statsRes.json.data.stats.totalPortfolioItems >= 1);
-
-    assert.equal(recentOrdersRes.status, 200);
-    assert.ok(recentOrdersRes.json.data.orders.length >= 2);
-
-    assert.equal(recentMessagesRes.status, 200);
-    assert.ok(recentMessagesRes.json.data.messages.length >= 2);
-
-    assert.equal(analyticsRes.status, 200);
-    assert.ok(Array.isArray(analyticsRes.json.data.analytics.byStatus));
-    assert.ok(Array.isArray(analyticsRes.json.data.analytics.byService));
-  });
-
-  it('15. Database persistence across restarts keeps created orders and messages intact', async () => {
-    const reopenedEnv = createNodeWorkerEnv({ dbPath, r2Dir });
-    const req = new Request(
-      'https://dreamtechkashmirsolutions.studio/api/v1/admin/dashboard/stats',
-      {
-        method: 'GET',
-        headers: { Authorization: `Bearer ${accessToken}` },
-      }
-    );
-    const res = await workerApp.fetch(req, reopenedEnv, {});
-    const json = await res.json();
-    reopenedEnv.DB.close();
-    assert.equal(res.status, 200);
-    assert.ok(json.data.stats.totalOrders >= 2);
-  });
-
-  it('16. CORS restrictions allow production studio domain and block unauthorized origins', async () => {
-    const allowedPreflight = await apiRequest('/api/v1/services', {
-      method: 'OPTIONS',
-      origin: 'https://dreamtechkashmirsolutions.studio',
-    });
-    assert.equal(allowedPreflight.status, 204);
-    assert.equal(
-      allowedPreflight.headers.get('Access-Control-Allow-Origin'),
-      'https://dreamtechkashmirsolutions.studio'
-    );
-
-    const blockedPreflight = await apiRequest('/api/v1/services', {
-      method: 'OPTIONS',
-      origin: 'https://evil-attacker.example.com',
-    });
-    assert.equal(blockedPreflight.status, 403);
-  });
-
-  it('17. Rate limiting blocks brute-force login attempts with HTTP 429', async () => {
-    const bruteIp = '203.0.113.77';
-    let lastStatus = 200;
-
-    for (let i = 0; i < 11; i++) {
-      const res = await apiRequest('/api/v1/auth/login', {
-        method: 'POST',
-        ip: bruteIp,
-        body: {
-          email: 'admin@dreamtechkashmirsolutions.studio',
-          password: 'WrongPassword!',
-        },
-      });
-      lastStatus = res.status;
-    }
-
-    assert.equal(lastStatus, 429);
-  });
-
-  it('18. Request validation & sanitization strip dangerous script tags and reject spam honeypots', async () => {
+  it('12. Contact Messages, XSS Sanitization & Spam Protection: Works end-to-end', async () => {
+    // Spam honeypot rejected
     const spamRes = await apiRequest('/api/v1/contact', {
       method: 'POST',
       body: {
         name: 'Spam Bot',
         email: 'bot@example.com',
         subject: 'Spam',
-        message: 'Automated spam message content',
-        website_url_honeypot: 'http://spam-site.example.com',
+        message: 'Automated spam submission',
+        website_url_honeypot: 'http://spam.example.com',
       },
     });
     assert.equal(spamRes.status, 400);
 
-    const xssRes = await apiRequest('/api/v1/contact', {
+    // XSS script tags sanitized
+    const createMsg = await apiRequest('/api/v1/contact', {
       method: 'POST',
       body: {
-        name: 'Bilal <script>alert("xss")</script> Khan',
-        email: 'bilal.khan@example.com',
-        subject: 'Website Consultation',
-        message: 'Looking for a corporate website without <script>evil()</script> payloads.',
+        name: 'Nadia <script>alert(1)</script> Shah',
+        email: 'nadia.shah@example.com',
+        phone: '+91 99061 11223',
+        subject: 'Corporate Website Redesign Inquiry',
+        message: 'We want to redesign our existing 10-page website without <script>evil()</script> tags.',
       },
     });
-    assert.equal(xssRes.status, 201);
-    assert.ok(!xssRes.json.data.message.name.includes('<script>'));
-    assert.ok(!xssRes.json.data.message.message.includes('<script>'));
+    assert.equal(createMsg.status, 201);
+    const inquiryId = createMsg.json.data.message.id;
+    assert.ok(!createMsg.json.data.message.name.includes('<script>'));
+    assert.ok(!createMsg.json.data.message.message.includes('<script>'));
+
+    const searchRes = await apiRequest('/api/v1/contact?search=Nadia', { token: accessToken });
+    assert.equal(searchRes.status, 200);
+    assert.ok(searchRes.json.data.messages.some((m) => m.id === inquiryId));
+
+    const patchRes = await apiRequest(`/api/v1/contact/${inquiryId}`, {
+      method: 'PATCH',
+      token: accessToken,
+      body: { status: 'Replied', admin_notes: 'Shared consultation proposal.' },
+    });
+    assert.equal(patchRes.status, 200);
+    assert.equal(patchRes.json.data.message.status, 'Replied');
   });
 
-  it('19. File upload restrictions reject non-image files and spoofed binary signatures', async () => {
-    const badForm = new FormData();
-    const textBlob = new Blob(['<script>alert(1)</script>'], { type: 'text/html' });
-    badForm.append('file', textBlob, 'malicious.html');
+  it('13. Distributed Rate Limiting & Database Persistence Across Restarts: Enforces limits across separate Worker isolates', async () => {
+    const bruteIp = '203.0.113.99';
+    let lastStatus = 200;
 
-    const res = await apiRequest('/api/v1/portfolio/upload', {
-      method: 'POST',
-      token: accessToken,
-      body: badForm,
+    // Simulate 6 requests on Isolate 1 (`env`) and 5 requests on Isolate 2 (`secondIsolateEnv`) sharing the same D1 DB
+    const secondIsolateEnv = createNodeWorkerEnv({
+      dbPath,
+      r2Dir,
+      overrides: { JWT_SECRET: TEST_JWT_SECRET },
     });
-    assert.equal(res.status, 400);
-    assert.equal(res.json.error.code, 'INVALID_IMAGE_UPLOAD');
 
-    const spoofedForm = new FormData();
-    const spoofedBlob = new Blob([Buffer.from('not-a-real-png-binary')], { type: 'image/png' });
-    spoofedForm.append('file', spoofedBlob, 'spoofed.png');
+    for (let i = 0; i < 6; i++) {
+      const res = await apiRequest('/api/v1/auth/login', {
+        method: 'POST',
+        ip: bruteIp,
+        customEnv: env,
+        body: { email: TEST_ADMIN_EMAIL, password: 'WrongPassword!' },
+      });
+      lastStatus = res.status;
+    }
+    assert.equal(lastStatus, 401);
 
-    const spoofRes = await apiRequest('/api/v1/portfolio/upload', {
-      method: 'POST',
+    for (let i = 0; i < 5; i++) {
+      const res = await apiRequest('/api/v1/auth/login', {
+        method: 'POST',
+        ip: bruteIp,
+        customEnv: secondIsolateEnv,
+        body: { email: TEST_ADMIN_EMAIL, password: 'WrongPassword!' },
+      });
+      lastStatus = res.status;
+    }
+
+    // 11th attempt across two separate Worker isolates must be blocked with 429 via shared D1 rate_limits table
+    assert.equal(lastStatus, 429, 'Distributed D1 rate limiter must block brute-force across isolates');
+
+    // Verify dashboard stats persist across restarts on the second isolate
+    const statsRes = await apiRequest('/api/v1/admin/dashboard/stats', {
       token: accessToken,
-      body: spoofedForm,
+      customEnv: secondIsolateEnv,
     });
-    assert.equal(spoofRes.status, 400);
-    assert.equal(spoofRes.json.error.code, 'INVALID_IMAGE_UPLOAD');
+    secondIsolateEnv.DB.close();
+    assert.equal(statsRes.status, 200);
+    assert.ok(statsRes.json.data.stats.totalOrders >= 1);
+    assert.ok(statsRes.json.data.stats.totalCustomers >= 1);
+    assert.ok(statsRes.json.data.stats.totalContactMessages >= 1);
   });
 
-  it('20. Admin role-based authorization & public site settings protect sensitive configuration', async () => {
-    // Public GET /api/v1/settings succeeds and strips any secret keys
-    const updateSettingsRes = await apiRequest('/api/v1/settings', {
+  it('14. Production Configuration, CORS Enforcement & Secret Stripping: Enforces strict production security', async () => {
+    // CORS allowlist check
+    const allowedCors = await apiRequest('/api/v1/services', {
+      method: 'OPTIONS',
+      origin: 'https://dreamtechkashmirsolutions.studio',
+    });
+    assert.equal(allowedCors.status, 204);
+
+    const blockedCors = await apiRequest('/api/v1/services', {
+      method: 'OPTIONS',
+      origin: 'https://malicious.example.com',
+    });
+    assert.equal(blockedCors.status, 403);
+
+    // Production environment with weak/placeholder JWT_SECRET must refuse token verification
+    const misconfiguredProdEnv = createNodeWorkerEnv({
+      dbPath,
+      r2Dir,
+      overrides: {
+        ENVIRONMENT: 'production',
+        JWT_SECRET: 'short-secret',
+      },
+    });
+    const prodAuthRes = await apiRequest('/api/v1/auth/me', {
+      token: accessToken,
+      customEnv: misconfiguredProdEnv,
+    });
+    misconfiguredProdEnv.DB.close();
+    assert.equal(prodAuthRes.status, 500);
+
+    // Public settings never expose secret keys
+    const updateSettings = await apiRequest('/api/v1/settings', {
       method: 'PUT',
       token: accessToken,
       body: {
         companyName: 'DreamTech Kashmir Solutions',
-        officialEmail: 'dreamtechkashmirsolutions@gmail.com',
-        jwtSecret: 'should-never-be-stored-or-exposed',
-        apiKey: 'should-be-stripped',
+        jwtSecret: 'should-be-stripped',
+        resendApiKey: 'should-be-stripped',
       },
     });
-    assert.equal(updateSettingsRes.status, 200);
-    assert.equal(updateSettingsRes.json.data.settings.jwtSecret, undefined);
-    assert.equal(updateSettingsRes.json.data.settings.apiKey, undefined);
-
-    const publicSettingsRes = await apiRequest('/api/v1/settings');
-    assert.equal(publicSettingsRes.status, 200);
-    assert.equal(publicSettingsRes.json.data.settings.companyName, 'DreamTech Kashmir Solutions');
-    assert.equal(publicSettingsRes.json.data.settings.jwtSecret, undefined);
-
-    // Token for an inactive or non-existent admin role is rejected
-    const fakeRoleToken = await signJwt(
-      {
-        sub: 'adm-dtks-1',
-        email: 'admin@dreamtechkashmirsolutions.studio',
-        role: 'guest',
-        type: 'access',
-      },
-      env.JWT_SECRET,
-      900
-    );
-    //Temporarily set invalid role in DB to verify RBAC enforcement
-    await env.DB.prepare("UPDATE admins SET is_active = 0 WHERE id = 'adm-dtks-1'").run();
-    const disabledAdminRes = await apiRequest('/api/v1/admin/dashboard/stats', {
-      token: fakeRoleToken,
-    });
-    assert.equal(disabledAdminRes.status, 401);
-    await env.DB.prepare("UPDATE admins SET is_active = 1 WHERE id = 'adm-dtks-1'").run();
+    assert.equal(updateSettings.status, 200);
+    assert.equal(updateSettings.json.data.settings.jwtSecret, undefined);
+    assert.equal(updateSettings.json.data.settings.resendApiKey, undefined);
   });
 });

@@ -2,6 +2,7 @@
 -- DTKS (DreamTech Kashmir Solutions) — Cloudflare D1 Initial Relational Schema
 -- Migration: 0001_initial_schema.sql
 -- Target: Cloudflare D1 (SQLite)
+-- Safe & Idempotent: Uses CREATE TABLE IF NOT EXISTS / CREATE INDEX IF NOT EXISTS
 -- =============================================================================
 
 PRAGMA foreign_keys = ON;
@@ -280,3 +281,13 @@ CREATE TABLE IF NOT EXISTS activity_logs (
 CREATE INDEX IF NOT EXISTS idx_activity_logs_admin_id ON activity_logs(admin_id);
 CREATE INDEX IF NOT EXISTS idx_activity_logs_entity ON activity_logs(entity_type, entity_id);
 CREATE INDEX IF NOT EXISTS idx_activity_logs_timestamp ON activity_logs(timestamp DESC);
+
+-- 13. rate_limits (Distributed Sliding-Window Rate Limiting Across Worker Isolates)
+CREATE TABLE IF NOT EXISTS rate_limits (
+  rate_key TEXT PRIMARY KEY,
+  window_start INTEGER NOT NULL,
+  request_count INTEGER NOT NULL DEFAULT 1,
+  expires_at INTEGER NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_rate_limits_expires_at ON rate_limits(expires_at);

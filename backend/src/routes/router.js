@@ -5,7 +5,7 @@ import { checkRateLimit } from '../middleware/rateLimiter.js';
 import { authenticateAdmin } from '../middleware/authMiddleware.js';
 import { handleException } from '../middleware/errorHandler.js';
 import { successResponse, errorResponse, parseJsonBody } from '../utils/response.js';
-import { ensureDatabaseSeeded, resetAndReseedDatabase } from '../database/seed.js';
+import { ensureDatabaseSeeded } from '../database/seed.js';
 import { serveImageFromR2 } from '../services/storageService.js';
 
 import {
@@ -81,6 +81,9 @@ import {
   getPublicBootstrap,
 } from '../controllers/settingsController.js';
 
+const ROLES_ALL_ADMINS = ['super_admin', 'admin', 'editor'];
+const ROLES_PRIVILEGED_ADMINS = ['super_admin', 'admin'];
+
 function matchPath(pattern, pathname) {
   const patternParts = pattern.split('/').filter(Boolean);
   const pathParts = pathname.split('/').filter(Boolean);
@@ -115,14 +118,14 @@ export async function handleApiRequest(request, env) {
     return applySecurityAndCorsHeaders(preflight, request, env);
   }
 
-  // 3. General API Rate Limit Check
-  const generalRate = checkRateLimit(request, 'generalApi');
+  // 3. Distributed General API Rate Limit Check
+  const generalRate = await checkRateLimit(request, 'generalApi', env);
   if (!generalRate.allowed) {
     return applySecurityAndCorsHeaders(generalRate.response, request, env);
   }
 
   try {
-    // Ensure database is seeded idempotently
+    // Ensure database reference catalog is initialized idempotently without overwriting existing data
     await ensureDatabaseSeeded(env);
 
     let response = null;
@@ -164,7 +167,7 @@ export async function handleApiRequest(request, env) {
     // 1. AUTHENTICATION ROUTES (/api/v1/auth/*)
     // ========================================================================
     if (pathname === `${API_PREFIX}/auth/login` && method === 'POST') {
-      const loginRate = checkRateLimit(request, 'authLogin');
+      const loginRate = await checkRateLimit(request, 'authLogin', env);
       if (!loginRate.allowed) {
         return applySecurityAndCorsHeaders(loginRate.response, request, env);
       }
@@ -178,27 +181,27 @@ export async function handleApiRequest(request, env) {
     }
 
     if (pathname === `${API_PREFIX}/auth/logout` && method === 'POST') {
-      const auth = await authenticateAdmin(request, env);
+      const auth = await authenticateAdmin(request, env, ROLES_ALL_ADMINS);
       response = await logoutAdmin(request, env, auth.authenticated ? auth.admin : null);
       return applySecurityAndCorsHeaders(response, request, env);
     }
 
     if (pathname === `${API_PREFIX}/auth/me` && method === 'GET') {
-      const auth = await authenticateAdmin(request, env);
+      const auth = await authenticateAdmin(request, env, ROLES_ALL_ADMINS);
       if (!auth.authenticated) return applySecurityAndCorsHeaders(auth.response, request, env);
       response = await getAuthenticatedAdmin(request, env, auth.admin);
       return applySecurityAndCorsHeaders(response, request, env);
     }
 
     if (pathname === `${API_PREFIX}/auth/profile` && (method === 'PATCH' || method === 'PUT')) {
-      const auth = await authenticateAdmin(request, env);
+      const auth = await authenticateAdmin(request, env, ROLES_ALL_ADMINS);
       if (!auth.authenticated) return applySecurityAndCorsHeaders(auth.response, request, env);
       response = await updateAdminProfile(request, env, auth.admin);
       return applySecurityAndCorsHeaders(response, request, env);
     }
 
     if (pathname === `${API_PREFIX}/auth/change-password` && method === 'POST') {
-      const auth = await authenticateAdmin(request, env);
+      const auth = await authenticateAdmin(request, env, ROLES_ALL_ADMINS);
       if (!auth.authenticated) return applySecurityAndCorsHeaders(auth.response, request, env);
       response = await changeAdminPassword(request, env, auth.admin);
       return applySecurityAndCorsHeaders(response, request, env);
@@ -213,7 +216,7 @@ export async function handleApiRequest(request, env) {
         return applySecurityAndCorsHeaders(response, request, env);
       }
       if (method === 'POST') {
-        const auth = await authenticateAdmin(request, env);
+        const auth = await authenticateAdmin(request, env, ROLES_ALL_ADMINS);
         if (!auth.authenticated) return applySecurityAndCorsHeaders(auth.response, request, env);
         response = await createService(request, env, auth.admin);
         return applySecurityAndCorsHeaders(response, request, env);
@@ -227,13 +230,13 @@ export async function handleApiRequest(request, env) {
         return applySecurityAndCorsHeaders(response, request, env);
       }
       if (method === 'PUT' || method === 'PATCH') {
-        const auth = await authenticateAdmin(request, env);
+        const auth = await authenticateAdmin(request, env, ROLES_ALL_ADMINS);
         if (!auth.authenticated) return applySecurityAndCorsHeaders(auth.response, request, env);
         response = await updateService(request, env, auth.admin, serviceMatch.slugOrId);
         return applySecurityAndCorsHeaders(response, request, env);
       }
       if (method === 'DELETE') {
-        const auth = await authenticateAdmin(request, env);
+        const auth = await authenticateAdmin(request, env, ROLES_PRIVILEGED_ADMINS);
         if (!auth.authenticated) return applySecurityAndCorsHeaders(auth.response, request, env);
         response = await deleteService(request, env, auth.admin, serviceMatch.slugOrId);
         return applySecurityAndCorsHeaders(response, request, env);
@@ -249,7 +252,7 @@ export async function handleApiRequest(request, env) {
         return applySecurityAndCorsHeaders(response, request, env);
       }
       if (method === 'POST') {
-        const auth = await authenticateAdmin(request, env);
+        const auth = await authenticateAdmin(request, env, ROLES_ALL_ADMINS);
         if (!auth.authenticated) return applySecurityAndCorsHeaders(auth.response, request, env);
         response = await createPackage(request, env, auth.admin);
         return applySecurityAndCorsHeaders(response, request, env);
@@ -257,14 +260,14 @@ export async function handleApiRequest(request, env) {
     }
 
     if (pathname === `${API_PREFIX}/packages/config/maintenance` && method === 'PUT') {
-      const auth = await authenticateAdmin(request, env);
+      const auth = await authenticateAdmin(request, env, ROLES_PRIVILEGED_ADMINS);
       if (!auth.authenticated) return applySecurityAndCorsHeaders(auth.response, request, env);
       response = await updateMaintenancePlansConfig(request, env, auth.admin);
       return applySecurityAndCorsHeaders(response, request, env);
     }
 
     if (pathname === `${API_PREFIX}/packages/config/addons` && method === 'PUT') {
-      const auth = await authenticateAdmin(request, env);
+      const auth = await authenticateAdmin(request, env, ROLES_PRIVILEGED_ADMINS);
       if (!auth.authenticated) return applySecurityAndCorsHeaders(auth.response, request, env);
       response = await updateAddonsConfig(request, env, auth.admin);
       return applySecurityAndCorsHeaders(response, request, env);
@@ -277,13 +280,13 @@ export async function handleApiRequest(request, env) {
         return applySecurityAndCorsHeaders(response, request, env);
       }
       if (method === 'PUT' || method === 'PATCH') {
-        const auth = await authenticateAdmin(request, env);
+        const auth = await authenticateAdmin(request, env, ROLES_ALL_ADMINS);
         if (!auth.authenticated) return applySecurityAndCorsHeaders(auth.response, request, env);
         response = await updatePackage(request, env, auth.admin, packageMatch.id);
         return applySecurityAndCorsHeaders(response, request, env);
       }
       if (method === 'DELETE') {
-        const auth = await authenticateAdmin(request, env);
+        const auth = await authenticateAdmin(request, env, ROLES_PRIVILEGED_ADMINS);
         if (!auth.authenticated) return applySecurityAndCorsHeaders(auth.response, request, env);
         response = await deletePackage(request, env, auth.admin, packageMatch.id);
         return applySecurityAndCorsHeaders(response, request, env);
@@ -295,13 +298,13 @@ export async function handleApiRequest(request, env) {
     // ========================================================================
     if (pathname === `${API_PREFIX}/portfolio/upload`) {
       if (method === 'POST') {
-        const auth = await authenticateAdmin(request, env);
+        const auth = await authenticateAdmin(request, env, ROLES_ALL_ADMINS);
         if (!auth.authenticated) return applySecurityAndCorsHeaders(auth.response, request, env);
         response = await uploadPortfolioImage(request, env, auth.admin);
         return applySecurityAndCorsHeaders(response, request, env);
       }
       if (method === 'DELETE') {
-        const auth = await authenticateAdmin(request, env);
+        const auth = await authenticateAdmin(request, env, ROLES_ALL_ADMINS);
         if (!auth.authenticated) return applySecurityAndCorsHeaders(auth.response, request, env);
         let key = url.searchParams.get('key') || '';
         if (!key) {
@@ -314,7 +317,7 @@ export async function handleApiRequest(request, env) {
     }
 
     if (pathname.startsWith(`${API_PREFIX}/portfolio/upload/`) && method === 'DELETE') {
-      const auth = await authenticateAdmin(request, env);
+      const auth = await authenticateAdmin(request, env, ROLES_ALL_ADMINS);
       if (!auth.authenticated) return applySecurityAndCorsHeaders(auth.response, request, env);
       const key = pathname.slice(`${API_PREFIX}/portfolio/upload/`.length);
       response = await deletePortfolioImage(request, env, auth.admin, key);
@@ -327,7 +330,7 @@ export async function handleApiRequest(request, env) {
         return applySecurityAndCorsHeaders(response, request, env);
       }
       if (method === 'POST') {
-        const auth = await authenticateAdmin(request, env);
+        const auth = await authenticateAdmin(request, env, ROLES_ALL_ADMINS);
         if (!auth.authenticated) return applySecurityAndCorsHeaders(auth.response, request, env);
         response = await createPortfolioProject(request, env, auth.admin);
         return applySecurityAndCorsHeaders(response, request, env);
@@ -341,13 +344,13 @@ export async function handleApiRequest(request, env) {
         return applySecurityAndCorsHeaders(response, request, env);
       }
       if (method === 'PUT' || method === 'PATCH') {
-        const auth = await authenticateAdmin(request, env);
+        const auth = await authenticateAdmin(request, env, ROLES_ALL_ADMINS);
         if (!auth.authenticated) return applySecurityAndCorsHeaders(auth.response, request, env);
         response = await updatePortfolioProject(request, env, auth.admin, portfolioMatch.slugOrId);
         return applySecurityAndCorsHeaders(response, request, env);
       }
       if (method === 'DELETE') {
-        const auth = await authenticateAdmin(request, env);
+        const auth = await authenticateAdmin(request, env, ROLES_PRIVILEGED_ADMINS);
         if (!auth.authenticated) return applySecurityAndCorsHeaders(auth.response, request, env);
         response = await deletePortfolioProject(request, env, auth.admin, portfolioMatch.slugOrId);
         return applySecurityAndCorsHeaders(response, request, env);
@@ -364,13 +367,13 @@ export async function handleApiRequest(request, env) {
 
     if (pathname === `${API_PREFIX}/orders`) {
       if (method === 'POST') {
-        const subRate = checkRateLimit(request, 'publicSubmission');
+        const subRate = await checkRateLimit(request, 'publicSubmission', env);
         if (!subRate.allowed) return applySecurityAndCorsHeaders(subRate.response, request, env);
         response = await createOrder(request, env);
         return applySecurityAndCorsHeaders(response, request, env);
       }
       if (method === 'GET') {
-        const auth = await authenticateAdmin(request, env);
+        const auth = await authenticateAdmin(request, env, ROLES_ALL_ADMINS);
         if (!auth.authenticated) return applySecurityAndCorsHeaders(auth.response, request, env);
         response = await listOrders(request, env);
         return applySecurityAndCorsHeaders(response, request, env);
@@ -379,7 +382,7 @@ export async function handleApiRequest(request, env) {
 
     const orderStatusMatch = matchPath(`${API_PREFIX}/orders/:id/status`, pathname);
     if (orderStatusMatch && (method === 'PATCH' || method === 'PUT')) {
-      const auth = await authenticateAdmin(request, env);
+      const auth = await authenticateAdmin(request, env, ROLES_ALL_ADMINS);
       if (!auth.authenticated) return applySecurityAndCorsHeaders(auth.response, request, env);
       response = await updateOrderStatusOnly(request, env, auth.admin, orderStatusMatch.id);
       return applySecurityAndCorsHeaders(response, request, env);
@@ -387,18 +390,21 @@ export async function handleApiRequest(request, env) {
 
     const orderMatch = matchPath(`${API_PREFIX}/orders/:id`, pathname);
     if (orderMatch) {
-      const auth = await authenticateAdmin(request, env);
-      if (!auth.authenticated) return applySecurityAndCorsHeaders(auth.response, request, env);
-
       if (method === 'GET') {
+        const auth = await authenticateAdmin(request, env, ROLES_ALL_ADMINS);
+        if (!auth.authenticated) return applySecurityAndCorsHeaders(auth.response, request, env);
         response = await getOrderById(request, env, orderMatch.id);
         return applySecurityAndCorsHeaders(response, request, env);
       }
       if (method === 'PATCH' || method === 'PUT') {
+        const auth = await authenticateAdmin(request, env, ROLES_ALL_ADMINS);
+        if (!auth.authenticated) return applySecurityAndCorsHeaders(auth.response, request, env);
         response = await updateOrderDetails(request, env, auth.admin, orderMatch.id);
         return applySecurityAndCorsHeaders(response, request, env);
       }
       if (method === 'DELETE') {
+        const auth = await authenticateAdmin(request, env, ROLES_PRIVILEGED_ADMINS);
+        if (!auth.authenticated) return applySecurityAndCorsHeaders(auth.response, request, env);
         response = await deleteOrder(request, env, auth.admin, orderMatch.id);
         return applySecurityAndCorsHeaders(response, request, env);
       }
@@ -409,13 +415,13 @@ export async function handleApiRequest(request, env) {
     // ========================================================================
     if (pathname === `${API_PREFIX}/contact`) {
       if (method === 'POST') {
-        const subRate = checkRateLimit(request, 'publicSubmission');
+        const subRate = await checkRateLimit(request, 'publicSubmission', env);
         if (!subRate.allowed) return applySecurityAndCorsHeaders(subRate.response, request, env);
         response = await createContactMessage(request, env);
         return applySecurityAndCorsHeaders(response, request, env);
       }
       if (method === 'GET') {
-        const auth = await authenticateAdmin(request, env);
+        const auth = await authenticateAdmin(request, env, ROLES_ALL_ADMINS);
         if (!auth.authenticated) return applySecurityAndCorsHeaders(auth.response, request, env);
         response = await listContactMessages(request, env);
         return applySecurityAndCorsHeaders(response, request, env);
@@ -424,18 +430,21 @@ export async function handleApiRequest(request, env) {
 
     const contactMatch = matchPath(`${API_PREFIX}/contact/:id`, pathname);
     if (contactMatch) {
-      const auth = await authenticateAdmin(request, env);
-      if (!auth.authenticated) return applySecurityAndCorsHeaders(auth.response, request, env);
-
       if (method === 'GET') {
+        const auth = await authenticateAdmin(request, env, ROLES_ALL_ADMINS);
+        if (!auth.authenticated) return applySecurityAndCorsHeaders(auth.response, request, env);
         response = await getContactMessageById(request, env, contactMatch.id);
         return applySecurityAndCorsHeaders(response, request, env);
       }
       if (method === 'PATCH' || method === 'PUT') {
+        const auth = await authenticateAdmin(request, env, ROLES_ALL_ADMINS);
+        if (!auth.authenticated) return applySecurityAndCorsHeaders(auth.response, request, env);
         response = await updateContactMessage(request, env, auth.admin, contactMatch.id);
         return applySecurityAndCorsHeaders(response, request, env);
       }
       if (method === 'DELETE') {
+        const auth = await authenticateAdmin(request, env, ROLES_PRIVILEGED_ADMINS);
+        if (!auth.authenticated) return applySecurityAndCorsHeaders(auth.response, request, env);
         response = await deleteContactMessage(request, env, auth.admin, contactMatch.id);
         return applySecurityAndCorsHeaders(response, request, env);
       }
@@ -445,35 +454,35 @@ export async function handleApiRequest(request, env) {
     // 7. DASHBOARD, CUSTOMERS, LOGS & ADMIN ROUTES (/api/v1/admin/*, /api/v1/customers/*)
     // ========================================================================
     if (pathname === `${API_PREFIX}/admin/dashboard/stats` && method === 'GET') {
-      const auth = await authenticateAdmin(request, env);
+      const auth = await authenticateAdmin(request, env, ROLES_ALL_ADMINS);
       if (!auth.authenticated) return applySecurityAndCorsHeaders(auth.response, request, env);
       response = await getDashboardStats(request, env);
       return applySecurityAndCorsHeaders(response, request, env);
     }
 
     if (pathname === `${API_PREFIX}/admin/dashboard/recent-orders` && method === 'GET') {
-      const auth = await authenticateAdmin(request, env);
+      const auth = await authenticateAdmin(request, env, ROLES_ALL_ADMINS);
       if (!auth.authenticated) return applySecurityAndCorsHeaders(auth.response, request, env);
       response = await getRecentOrders(request, env);
       return applySecurityAndCorsHeaders(response, request, env);
     }
 
     if (pathname === `${API_PREFIX}/admin/dashboard/recent-messages` && method === 'GET') {
-      const auth = await authenticateAdmin(request, env);
+      const auth = await authenticateAdmin(request, env, ROLES_ALL_ADMINS);
       if (!auth.authenticated) return applySecurityAndCorsHeaders(auth.response, request, env);
       response = await getRecentMessages(request, env);
       return applySecurityAndCorsHeaders(response, request, env);
     }
 
     if (pathname === `${API_PREFIX}/admin/dashboard/order-analytics` && method === 'GET') {
-      const auth = await authenticateAdmin(request, env);
+      const auth = await authenticateAdmin(request, env, ROLES_ALL_ADMINS);
       if (!auth.authenticated) return applySecurityAndCorsHeaders(auth.response, request, env);
       response = await getOrderAnalytics(request, env);
       return applySecurityAndCorsHeaders(response, request, env);
     }
 
     if (pathname === `${API_PREFIX}/customers` && method === 'GET') {
-      const auth = await authenticateAdmin(request, env);
+      const auth = await authenticateAdmin(request, env, ROLES_ALL_ADMINS);
       if (!auth.authenticated) return applySecurityAndCorsHeaders(auth.response, request, env);
       response = await listCustomers(request, env);
       return applySecurityAndCorsHeaders(response, request, env);
@@ -481,31 +490,23 @@ export async function handleApiRequest(request, env) {
 
     const customerMatch = matchPath(`${API_PREFIX}/customers/:id`, pathname);
     if (customerMatch && method === 'GET') {
-      const auth = await authenticateAdmin(request, env);
+      const auth = await authenticateAdmin(request, env, ROLES_ALL_ADMINS);
       if (!auth.authenticated) return applySecurityAndCorsHeaders(auth.response, request, env);
       response = await getCustomerById(request, env, customerMatch.id);
       return applySecurityAndCorsHeaders(response, request, env);
     }
 
     if (pathname === `${API_PREFIX}/admin/activity-logs` && method === 'GET') {
-      const auth = await authenticateAdmin(request, env);
+      const auth = await authenticateAdmin(request, env, ROLES_PRIVILEGED_ADMINS);
       if (!auth.authenticated) return applySecurityAndCorsHeaders(auth.response, request, env);
       response = await listActivityLogs(request, env);
       return applySecurityAndCorsHeaders(response, request, env);
     }
 
     if (pathname === `${API_PREFIX}/admin/notifications` && method === 'GET') {
-      const auth = await authenticateAdmin(request, env);
+      const auth = await authenticateAdmin(request, env, ROLES_PRIVILEGED_ADMINS);
       if (!auth.authenticated) return applySecurityAndCorsHeaders(auth.response, request, env);
       response = await listNotifications(request, env);
-      return applySecurityAndCorsHeaders(response, request, env);
-    }
-
-    if (pathname === `${API_PREFIX}/admin/reset-seed` && method === 'POST') {
-      const auth = await authenticateAdmin(request, env);
-      if (!auth.authenticated) return applySecurityAndCorsHeaders(auth.response, request, env);
-      await resetAndReseedDatabase(env, auth.admin);
-      response = await getPublicBootstrap(request, env);
       return applySecurityAndCorsHeaders(response, request, env);
     }
 
@@ -518,7 +519,7 @@ export async function handleApiRequest(request, env) {
         return applySecurityAndCorsHeaders(response, request, env);
       }
       if (method === 'PUT' || method === 'PATCH') {
-        const auth = await authenticateAdmin(request, env);
+        const auth = await authenticateAdmin(request, env, ROLES_PRIVILEGED_ADMINS);
         if (!auth.authenticated) return applySecurityAndCorsHeaders(auth.response, request, env);
         response = await updateSiteSettings(request, env, auth.admin);
         return applySecurityAndCorsHeaders(response, request, env);
@@ -531,7 +532,7 @@ export async function handleApiRequest(request, env) {
         return applySecurityAndCorsHeaders(response, request, env);
       }
       if (method === 'POST') {
-        const auth = await authenticateAdmin(request, env);
+        const auth = await authenticateAdmin(request, env, ROLES_ALL_ADMINS);
         if (!auth.authenticated) return applySecurityAndCorsHeaders(auth.response, request, env);
         response = await createTeamMember(request, env, auth.admin);
         return applySecurityAndCorsHeaders(response, request, env);
@@ -540,7 +541,7 @@ export async function handleApiRequest(request, env) {
 
     const teamReorderMatch = matchPath(`${API_PREFIX}/team/:id/reorder`, pathname);
     if (teamReorderMatch && (method === 'PATCH' || method === 'POST')) {
-      const auth = await authenticateAdmin(request, env);
+      const auth = await authenticateAdmin(request, env, ROLES_ALL_ADMINS);
       if (!auth.authenticated) return applySecurityAndCorsHeaders(auth.response, request, env);
       response = await reorderTeamMember(request, env, auth.admin, teamReorderMatch.id);
       return applySecurityAndCorsHeaders(response, request, env);
@@ -548,13 +549,15 @@ export async function handleApiRequest(request, env) {
 
     const teamMatch = matchPath(`${API_PREFIX}/team/:id`, pathname);
     if (teamMatch) {
-      const auth = await authenticateAdmin(request, env);
-      if (!auth.authenticated) return applySecurityAndCorsHeaders(auth.response, request, env);
       if (method === 'PUT' || method === 'PATCH') {
+        const auth = await authenticateAdmin(request, env, ROLES_ALL_ADMINS);
+        if (!auth.authenticated) return applySecurityAndCorsHeaders(auth.response, request, env);
         response = await updateTeamMember(request, env, auth.admin, teamMatch.id);
         return applySecurityAndCorsHeaders(response, request, env);
       }
       if (method === 'DELETE') {
+        const auth = await authenticateAdmin(request, env, ROLES_PRIVILEGED_ADMINS);
+        if (!auth.authenticated) return applySecurityAndCorsHeaders(auth.response, request, env);
         response = await deleteTeamMember(request, env, auth.admin, teamMatch.id);
         return applySecurityAndCorsHeaders(response, request, env);
       }
@@ -566,7 +569,7 @@ export async function handleApiRequest(request, env) {
         return applySecurityAndCorsHeaders(response, request, env);
       }
       if (method === 'POST') {
-        const auth = await authenticateAdmin(request, env);
+        const auth = await authenticateAdmin(request, env, ROLES_ALL_ADMINS);
         if (!auth.authenticated) return applySecurityAndCorsHeaders(auth.response, request, env);
         response = await createTestimonial(request, env, auth.admin);
         return applySecurityAndCorsHeaders(response, request, env);
@@ -575,7 +578,7 @@ export async function handleApiRequest(request, env) {
 
     const testimonialMatch = matchPath(`${API_PREFIX}/testimonials/:id`, pathname);
     if (testimonialMatch && method === 'DELETE') {
-      const auth = await authenticateAdmin(request, env);
+      const auth = await authenticateAdmin(request, env, ROLES_PRIVILEGED_ADMINS);
       if (!auth.authenticated) return applySecurityAndCorsHeaders(auth.response, request, env);
       response = await deleteTestimonial(request, env, auth.admin, testimonialMatch.id);
       return applySecurityAndCorsHeaders(response, request, env);

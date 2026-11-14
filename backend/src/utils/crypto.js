@@ -1,11 +1,20 @@
 /**
  * Cryptographic utilities for DTKS Backend (Cloudflare Workers + Node.js compatible)
- * Implements memory-hard/high-iteration password hashing ($argon2id$v=19$ envelope with
- * WebCrypto PBKDF2-SHA512 / Scrypt derivation and constant-time comparison),
- * HMAC-SHA256 JWT signing & verification, and SHA-256 token hashing.
+ *
+ * Password Hashing Algorithm:
+ *   - Uses Web Crypto API `PBKDF2` with `HMAC-SHA-512` (100,000 iterations, 16-byte CSPRNG salt, 32-byte key),
+ *     serialized in the canonical PHC string format:
+ *       `$pbkdf2-sha512$v=1$i=100000$<saltHex>$<hashHex>`
+ *   - Includes a transparent migration verifier for legacy `$argon2id$v=19$...` hashes created by
+ *     earlier versions of the repository, flagging `needsRehash: true` so existing administrator
+ *     credentials are automatically upgraded to `$pbkdf2-sha512$v=1$...` upon login.
  */
 
 const encoder = new TextEncoder();
+
+export const PBKDF2_DEFAULT_ITERATIONS = 100000;
+export const PBKDF2_SALT_BYTES = 16;
+export const PBKDF2_KEY_BITS = 256;
 
 function toHex(bytes) {
   return Array.from(bytes)
@@ -15,7 +24,7 @@ function toHex(bytes) {
 
 function fromHex(hex) {
   const clean = String(hex).trim();
-  if (clean.length % 2 !== 0) return new Uint8Array(0);
+  if (clean.length % 2 !== 0 || !/^[0-9a-fA-F]+$/.test(clean)) return new Uint8Array(0);
   const out = new Uint8Array(clean.length / 2);
   for (let i = 0; i < clean.length; i += 2) {
     out[i / 2] = Number.parseInt(clean.slice(i, i + 2), 16);
@@ -77,7 +86,7 @@ export async function sha256Hex(value) {
   return toHex(new Uint8Array(digest));
 }
 
-async function deriveKeyBytes(password, saltBytes, iterations = 100000) {
+async function derivePbkdf2Sha512Bytes(password, saltBytes, iterations = PBKDF2_DEFAULT_ITERATIONS) {
   const keyMaterial = await crypto.subtle.importKey(
     'raw',
     encoder.encode(String(password)),
@@ -93,57 +102,91 @@ async function deriveKeyBytes(password, saltBytes, iterations = 100000) {
       hash: 'SHA-512',
     },
     keyMaterial,
-    256
+    PBKDF2_KEY_BITS
   );
   return new Uint8Array(bits);
 }
 
 /**
- * Hashes a plaintext password using an Argon2id-formatted PHC string
- * backed by WebCrypto PBKDF2-HMAC-SHA512 (100,000 iterations, 16-byte random salt, 32-byte tag)
- * so it runs natively in both Cloudflare Workers and Node.js without native addon failures.
+ * Hashes a plaintext password using WebCrypto PBKDF2-HMAC-SHA512 (100,000 iterations,
+ * 16-byte CSPRNG salt, 32-byte derived key) in canonical PHC format:
+ *   `$pbkdf2-sha512$v=1$i=100000$<saltHex>$<hashHex>`
  */
-export async function hashPassword(password) {
+export async function hashPassword(password, iterations = PBKDF2_DEFAULT_ITERATIONS) {
   if (typeof password !== 'string' || password.length < 8) {
     throw new Error('Password must be at least 8 characters long.');
   }
-  const salt = new Uint8Array(16);
+  const safeIterations = Math.max(10000, Math.min(100000, Number(iterations) || PBKDF2_DEFAULT_ITERATIONS));
+  const salt = new Uint8Array(PBKDF2_SALT_BYTES);
   crypto.getRandomValues(salt);
-  const iterations = 100000;
-  const derived = await deriveKeyBytes(password, salt, iterations);
-  return `$argon2id$v=19$m=65536,t=${iterations},p=4$${toHex(salt)}$${toHex(derived)}`;
+  const derived = await derivePbkdf2Sha512Bytes(password, salt, safeIterations);
+  return `$pbkdf2-sha512$v=1$i=${safeIterations}$${toHex(salt)}$${toHex(derived)}`;
 }
 
 /**
- * Verifies a plaintext password against a stored PHC hash in constant time.
+ * Verifies a plaintext password against a stored hash and indicates whether the stored hash
+ * should be migrated to the current `$pbkdf2-sha512$v=1$i=100000$...` format.
+ *
+ * Supports:
+ *   1. Canonical `$pbkdf2-sha512$v=1$i=<iterations>$<saltHex>$<hashHex>`
+ *   2. Legacy `$argon2id$v=19$m=65536,t=<iterations>,p=4$<saltHex>$<hashHex>` (marks `needsRehash: true`)
  */
-export async function verifyPassword(password, storedHash) {
+export async function verifyPasswordWithMigration(password, storedHash) {
   if (typeof password !== 'string' || typeof storedHash !== 'string') {
-    return false;
+    return { valid: false, needsRehash: false };
   }
+
   const parts = storedHash.split('$').filter(Boolean);
-  // Format: argon2id $ v=19 $ m=65536,t=100000,p=4 $ <saltHex> $ <hashHex>
-  if (parts.length !== 5 || parts[0] !== 'argon2id') {
-    return false;
-  }
-  const paramsPart = parts[2];
-  const saltHex = parts[3];
-  const hashHex = parts[4];
-
-  let iterations = 100000;
-  const tMatch = /t=(\d+)/.exec(paramsPart);
-  if (tMatch) {
-    iterations = Number.parseInt(tMatch[1], 10) || 100000;
+  if (parts.length !== 5) {
+    return { valid: false, needsRehash: false };
   }
 
+  const [scheme, , paramsPart, saltHex, hashHex] = parts;
   const saltBytes = fromHex(saltHex);
   const expectedBytes = fromHex(hashHex);
   if (saltBytes.length === 0 || expectedBytes.length === 0) {
-    return false;
+    return { valid: false, needsRehash: false };
   }
 
-  const candidateBytes = await deriveKeyBytes(password, saltBytes, iterations);
-  return timingSafeEqualBytes(candidateBytes, expectedBytes);
+  // 1. Canonical PBKDF2-SHA512 format: $pbkdf2-sha512$v=1$i=100000$<saltHex>$<hashHex>
+  if (scheme === 'pbkdf2-sha512') {
+    const iMatch = /i=(\d+)/.exec(paramsPart);
+    const iterations = iMatch ? Number.parseInt(iMatch[1], 10) : PBKDF2_DEFAULT_ITERATIONS;
+    if (!Number.isFinite(iterations) || iterations < 1000 || iterations > 500000) {
+      return { valid: false, needsRehash: false };
+    }
+    const candidateBytes = await derivePbkdf2Sha512Bytes(password, saltBytes, iterations);
+    const valid = timingSafeEqualBytes(candidateBytes, expectedBytes);
+    return {
+      valid,
+      needsRehash: valid && iterations < PBKDF2_DEFAULT_ITERATIONS,
+    };
+  }
+
+  // 2. Legacy mislabeled format from earlier repo commits: $argon2id$v=19$m=65536,t=100000,p=4$<saltHex>$<hashHex>
+  if (scheme === 'argon2id') {
+    const tMatch = /t=(\d+)/.exec(paramsPart);
+    const iterations = tMatch ? Number.parseInt(tMatch[1], 10) : PBKDF2_DEFAULT_ITERATIONS;
+    if (!Number.isFinite(iterations) || iterations < 1000 || iterations > 500000) {
+      return { valid: false, needsRehash: false };
+    }
+    const candidateBytes = await derivePbkdf2Sha512Bytes(password, saltBytes, iterations);
+    const valid = timingSafeEqualBytes(candidateBytes, expectedBytes);
+    return {
+      valid,
+      needsRehash: valid, // Always upgrade legacy hashes on successful verification
+    };
+  }
+
+  return { valid: false, needsRehash: false };
+}
+
+/**
+ * Boolean password verification wrapper.
+ */
+export async function verifyPassword(password, storedHash) {
+  const result = await verifyPasswordWithMigration(password, storedHash);
+  return result.valid;
 }
 
 async function importHmacKey(secret) {
@@ -159,7 +202,7 @@ async function importHmacKey(secret) {
 /**
  * Signs a JWT payload using HS256.
  */
-export async function signJwt(payload, secret, expiresInSeconds = 3600) {
+export async function signJwt(payload, secret, expiresInSeconds = 900) {
   if (!secret || String(secret).length < 16) {
     throw new Error('JWT secret must be configured and at least 16 characters.');
   }
@@ -186,6 +229,11 @@ export async function signJwt(payload, secret, expiresInSeconds = 3600) {
  * Verifies an HS256 JWT token and returns the decoded payload or throws an error.
  */
 export async function verifyJwt(token, secret) {
+  if (!secret || String(secret).length < 16) {
+    const err = new Error('JWT secret is not properly configured.');
+    err.code = 'SERVER_MISCONFIGURED';
+    throw err;
+  }
   if (typeof token !== 'string' || !token.includes('.')) {
     const err = new Error('Invalid authentication token format.');
     err.code = 'INVALID_TOKEN';
@@ -199,8 +247,23 @@ export async function verifyJwt(token, secret) {
   }
 
   const [encodedHeader, encodedPayload, encodedSignature] = parts;
-  const signingInput = `${encodedHeader}.${encodedPayload}`;
 
+  let header;
+  try {
+    header = JSON.parse(base64UrlDecodeToString(encodedHeader));
+  } catch {
+    const err = new Error('Malformed JWT header.');
+    err.code = 'INVALID_TOKEN';
+    throw err;
+  }
+
+  if (!header || header.alg !== 'HS256') {
+    const err = new Error('Unsupported JWT algorithm.');
+    err.code = 'INVALID_TOKEN';
+    throw err;
+  }
+
+  const signingInput = `${encodedHeader}.${encodedPayload}`;
   const key = await importHmacKey(secret);
   const sigBytes = base64UrlDecodeToBytes(encodedSignature);
   const isValid = await crypto.subtle.verify(
@@ -226,7 +289,7 @@ export async function verifyJwt(token, secret) {
   }
 
   const now = Math.floor(Date.now() / 1000);
-  if (typeof payload.exp === 'number' && payload.exp <= now) {
+  if (typeof payload.exp !== 'number' || payload.exp <= now) {
     const err = new Error('Authentication token has expired.');
     err.code = 'TOKEN_EXPIRED';
     throw err;

@@ -86,14 +86,14 @@ Admin endpoints accept either:
 ### 4.1 Authentication (`/api/v1/auth`)
 
 #### `POST /api/v1/auth/login`
-Authenticates an active administrator, verifies PBKDF2-SHA256 password hash in constant time, updates `last_login_at`, creates a hashed session in `refresh_sessions`, and returns short-lived access token (`15m`) + refresh token (`7d`).
+Authenticates an active administrator, verifies the WebCrypto PBKDF2-HMAC-SHA512 (`$pbkdf2-sha512$v=1$i=100000$...`) password hash in constant time (transparently migrating legacy `$argon2id$` hashes on login), updates `last_login_at`, creates a hashed session in `refresh_sessions`, and returns a short-lived access token (`15m`) + refresh token (`7d`).
 
-- **Rate Limit:** 10 requests / 15 minutes per IP.
+- **Rate Limit:** 10 requests / 15 minutes per IP (distributed across isolates via D1 `rate_limits`).
 - **Request Body:**
   ```json
   {
     "email": "admin@dreamtechkashmirsolutions.studio",
-    "password": "Admin@DTKS2026!"
+    "password": "<YOUR_ADMIN_PASSWORD>"
   }
   ```
 - **Response (`200 OK`):**
@@ -107,7 +107,7 @@ Authenticates an active administrator, verifies PBKDF2-SHA256 password hash in c
       "csrfToken": "c9f1...",
       "expiresIn": 900,
       "admin": {
-        "id": "adm-dtks-1",
+        "id": "adm-dtks-initial",
         "name": "DreamTech Kashmir Admin",
         "email": "admin@dreamtechkashmirsolutions.studio",
         "role": "super_admin",
@@ -264,4 +264,36 @@ Revokes the active refresh session in `refresh_sessions` and clears auth cookies
 | Method | Endpoint | Auth | Description |
 | :--- | :--- | :--- | :--- |
 | `GET` | `/api/v1/settings` | Public | Returns public site settings (company name, email, phone, social links, business hours, hero content, SEO metadata) with sensitive keys stripped |
-| `PUT` | `/api/v1/settings` | Admin | Updates site settings in `site_settings` and logs admin activity |
+| `PUT` | `/api/v1/settings` | Admin (`super_admin`, `admin`) | Updates site settings in `site_settings` and logs admin activity |
+
+---
+
+### 4.9 Admin Activity Logs (`/api/v1/admin/activity-logs`)
+
+| Method | Endpoint | Auth | Description |
+| :--- | :--- | :--- | :--- |
+| `GET` | `/api/v1/admin/activity-logs` | Admin (`super_admin`, `admin`) | Returns audit trail of admin actions, logins, password hash migrations, and transactional email delivery logs (`?limit=50`) |
+
+---
+
+## 5. Role-Based Access Control (RBAC)
+
+| Role | Permitted Actions | Restricted Actions (`403 Forbidden`) |
+| :--- | :--- | :--- |
+| `super_admin` / `admin` | Full access to all endpoints (`GET`, `POST`, `PUT`, `PATCH`, `DELETE`), site settings, package configurations, and activity logs | None |
+| `editor` | Create and update services, packages, portfolio items, R2 uploads, order status/quotations, and contact inquiry statuses | Cannot `DELETE` services, packages, portfolio items, R2 objects, orders, or inquiries; cannot `PUT /api/v1/settings` or `PUT /api/v1/packages/config/*`; cannot view `/api/v1/admin/activity-logs` |
+
+---
+
+## 6. How the Separate Frontend (`DTKS`) Consumes the API
+
+The standalone frontend repository (`https://github.com/shahnaveed07/DTKS.git`) connects to this backend by setting:
+
+```env
+VITE_API_BASE_URL=https://api.dreamtechkashmirsolutions.studio/api/v1
+```
+(or `https://dreamtechkashmirsolutions.studio/api/v1` when using the same-origin Cloudflare Worker route).
+
+- **Public Pages** (`Home`, `Services`, `Packages`, `Portfolio`, `Order Form`, `Track Order`, `Contact`) call `GET /api/v1/bootstrap` (or individual `GET /services`, `GET /packages`, `GET /portfolio`, `GET /settings`), `POST /api/v1/orders`, `GET /api/v1/orders/track`, and `POST /api/v1/contact`.
+- **Admin Dashboard & Management Screens** authenticate via `POST /api/v1/auth/login`, attach `Authorization: Bearer <accessToken>` on protected requests, automatically refresh short-lived access tokens via `POST /api/v1/auth/refresh`, and manage services, packages, portfolio items (with `multipart/form-data` R2 image uploads to `POST /api/v1/portfolio/upload`), customer orders, inquiries, and site settings.
+

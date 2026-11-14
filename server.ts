@@ -1,13 +1,11 @@
 import 'dotenv/config';
 import express from 'express';
 import path from 'node:path';
-import fs from 'node:fs';
 import workerApp from './backend/src/index.js';
 import { createNodeWorkerEnv } from './backend/src/database/d1Adapter.js';
 import { ensureDatabaseSeeded } from './backend/src/database/seed.js';
 
 const PORT = Number(process.env.PORT || 3000);
-const isProduction = process.env.NODE_ENV === 'production';
 
 async function startServer() {
   const app = express();
@@ -19,11 +17,28 @@ async function startServer() {
     migrationsDir: path.resolve(process.cwd(), 'backend/migrations'),
   });
 
-  // Ensure initial database schema & seed data are ready on startup
+  // Ensure initial database schema & non-destructive catalog seed data are ready on startup
   await ensureDatabaseSeeded(workerEnv);
 
-  // Mount Cloudflare Worker API router at /api/v1/*
-  app.use('/api/v1', express.raw({ type: '*/*', limit: '6mb' }), async (req, res) => {
+  // Root status endpoint for standalone backend service
+  app.get('/', (_req, res) => {
+    res.status(200).json({
+      success: true,
+      message: 'DTKS_BE — DreamTech Kashmir Solutions Standalone Backend API',
+      data: {
+        service: 'dtks-backend-api',
+        version: '1.0.0',
+        apiBasePath: '/api/v1',
+        healthEndpoint: '/api/v1/health',
+        bootstrapEndpoint: '/api/v1/bootstrap',
+        frontendRepository: 'https://github.com/shahnaveed07/DTKS.git',
+        productionWebsite: 'https://dreamtechkashmirsolutions.studio/',
+      },
+    });
+  });
+
+  // Mount Cloudflare Worker API router for all /api/* routes
+  app.use(express.raw({ type: '*/*', limit: '6mb' }), async (req, res) => {
     try {
       const protocol = req.headers['x-forwarded-proto'] || req.protocol || 'http';
       const host = req.headers.host || `localhost:${PORT}`;
@@ -72,32 +87,12 @@ async function startServer() {
     }
   });
 
-  if (!isProduction) {
-    const { createServer: createViteServer } = await import('vite');
-    const vite = await createViteServer({
-      server: { middlewareMode: true },
-      appType: 'spa',
-    });
-    app.use(vite.middlewares);
-  } else {
-    const distDir = path.resolve(process.cwd(), 'dist');
-    app.use(express.static(distDir, { index: false }));
-    app.get('*', (req, res) => {
-      const indexFile = path.join(distDir, 'index.html');
-      if (fs.existsSync(indexFile)) {
-        res.sendFile(indexFile);
-      } else {
-        res.status(404).send('Build output not found. Run npm run build first.');
-      }
-    });
-  }
-
   app.listen(PORT, '0.0.0.0', () => {
-    console.log(`DTKS Full-Stack Server (Frontend + Worker D1/R2 API) running on http://0.0.0.0:${PORT}`);
+    console.log(`DTKS_BE Standalone Backend Server (Cloudflare Worker + D1/R2 Adapter) running on http://0.0.0.0:${PORT}`);
   });
 }
 
 startServer().catch((err) => {
-  console.error('Failed to start DTKS server:', err);
+  console.error('Failed to start DTKS_BE server:', err);
   process.exit(1);
 });
