@@ -1,10 +1,10 @@
-name = "dtks-backend-api"
+name = "dtks-be"
 main = "src/index.js"
 compatibility_date = "2025-02-01"
-workers_dev = false
+workers_dev = true
 
 # ==============================================================================
-# Custom Domain & Route Configuration for DTKS Production Backend API
+# Custom Domain & Route Configuration for DTKS Production Backend API (`dtks-be`)
 # IMPORTANT: Routes are strictly scoped to `api.dreamtechkashmirsolutions.studio/*`
 # and `/api/v1/*` so they NEVER override the separate frontend application hosted
 # at `https://dreamtechkashmirsolutions.studio/`.
@@ -32,13 +32,11 @@ INITIAL_ADMIN_NAME = "DTKS Principal Administrator"
 #   - RESEND_API_KEY          (Optional: Resend transactional email API key)
 # ==============================================================================
 
-# Cloudflare D1 Relational Database Binding
-# Replace `REPLACE_WITH_CLOUDFLARE_D1_DATABASE_ID` with the real UUID returned by:
-#   `npx wrangler d1 create dtks-production-db`
+# Cloudflare D1 Relational Database Binding (`dtks-production-db`)
 [[d1_databases]]
 binding = "DB"
 database_name = "dtks-production-db"
-database_id = "REPLACE_WITH_CLOUDFLARE_D1_DATABASE_ID"
+database_id = "be0ce24a-0151-412f-b308-1271bb62abba"
 migrations_dir = "migrations"
 
 # Cloudflare R2 Object Storage Binding for Portfolio & Uploaded Assets
@@ -46,11 +44,12 @@ migrations_dir = "migrations"
 binding = "ASSETS_BUCKET"
 bucket_name = "dtks-portfolio-assets"
 
-# Explicit `[env.production]` target so both `npx wrangler deploy` and
-# `npx wrangler deploy --env production` work with identical bindings.
+# Explicit `[env.production]` target matching the top-level `dtks-be` Worker
+# so both `npx wrangler deploy` and `npx wrangler deploy --env production`
+# target the exact same `dtks-be` Worker, D1 database, and R2 bucket.
 [env.production]
-name = "dtks-backend-api"
-workers_dev = false
+name = "dtks-be"
+workers_dev = true
 routes = [
   { pattern = "api.dreamtechkashmirsolutions.studio/*", zone_name = "dreamtechkashmirsolutions.studio" },
   { pattern = "dreamtechkashmirsolutions.studio/api/v1/*", zone_name = "dreamtechkashmirsolutions.studio" },

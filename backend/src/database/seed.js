@@ -677,166 +677,227 @@ function isValidBootstrapPassword(password, isProduction = false) {
   return true;
 }
 
+export const REQUIRED_D1_TABLES = [
+  'admins',
+  'refresh_sessions',
+  'customers',
+  'services',
+  'packages',
+  'portfolio',
+  'orders',
+  'order_items',
+  'order_status_history',
+  'contact_messages',
+  'site_settings',
+  'activity_logs',
+  'rate_limits',
+];
+
+/**
+ * Inspects `sqlite_master` to verify all required D1 tables exist.
+ */
+export async function verifyDatabaseSchema(db) {
+  if (!db || typeof db.prepare !== 'function') {
+    return { valid: false, missingTables: [...REQUIRED_D1_TABLES] };
+  }
+
+  const rowsResult = await db
+    .prepare("SELECT name FROM sqlite_master WHERE type = 'table'")
+    .all();
+  const existingSet = new Set(
+    (rowsResult?.results || []).map((r) => String(r.name || '').toLowerCase())
+  );
+
+  const missingTables = REQUIRED_D1_TABLES.filter((t) => !existingSet.has(t.toLowerCase()));
+  return {
+    valid: missingTables.length === 0,
+    missingTables,
+  };
+}
+
 /**
  * Safely and idempotently initializes reference catalog records and optional initial administrator.
  * Never overwrites or deletes existing database rows.
  */
 export async function ensureDatabaseSeeded(env) {
-  if (!env?.DB) return;
+  if (!env?.DB || typeof env.DB.prepare !== 'function') {
+    const err = new Error('Cloudflare D1 database binding (DB) is not configured.');
+    err.status = 503;
+    err.code = 'DATABASE_UNAVAILABLE';
+    throw err;
+  }
+
   if (initializedDatabases.has(env.DB)) return;
 
   const now = new Date().toISOString();
   const isProduction = env.ENVIRONMENT === 'production';
 
-  // 1. Safe Initial Administrator Bootstrap (ONLY if `admins` table is empty AND explicit credentials are provided)
-  const adminCountRow = await env.DB.prepare('SELECT COUNT(*) AS cnt FROM admins').first();
-  if (!adminCountRow || Number(adminCountRow.cnt) === 0) {
-    const rawEmail = (env.INITIAL_ADMIN_EMAIL || env.ADMIN_INITIAL_EMAIL || '').trim().toLowerCase();
-    const rawPassword = env.INITIAL_ADMIN_PASSWORD || env.ADMIN_INITIAL_PASSWORD || '';
-    const adminName = (
-      env.INITIAL_ADMIN_NAME ||
-      env.ADMIN_INITIAL_NAME ||
-      'DTKS Principal Administrator'
-    ).trim();
+  try {
+    // 1. Safe Initial Administrator Bootstrap (ONLY if `admins` table is empty AND explicit credentials are provided)
+    const adminCountRow = await env.DB.prepare('SELECT COUNT(*) AS cnt FROM admins').first();
+    if (!adminCountRow || Number(adminCountRow.cnt) === 0) {
+      const rawEmail = (env.INITIAL_ADMIN_EMAIL || env.ADMIN_INITIAL_EMAIL || '').trim().toLowerCase();
+      const rawPassword = env.INITIAL_ADMIN_PASSWORD || env.ADMIN_INITIAL_PASSWORD || '';
+      const adminName = (
+        env.INITIAL_ADMIN_NAME ||
+        env.ADMIN_INITIAL_NAME ||
+        'DTKS Principal Administrator'
+      ).trim();
 
-    if (isValidEmail(rawEmail) && isValidBootstrapPassword(rawPassword, isProduction)) {
-      const passwordHash = await hashPassword(rawPassword);
-      await env.DB.prepare(
-        `INSERT OR IGNORE INTO admins (id, name, email, password_hash, role, is_active, created_at, updated_at, last_login_at)
-         VALUES ('adm-root-1', ?, ?, ?, 'super_admin', 1, ?, ?, NULL)`
-      )
-        .bind(adminName, rawEmail, passwordHash, now, now)
-        .run();
-    }
-  }
-
-  // 2. Seed Reference Services (ONLY when `services` table is empty)
-  const svcCountRow = await env.DB.prepare('SELECT COUNT(*) AS cnt FROM services').first();
-  if (!svcCountRow || Number(svcCountRow.cnt) === 0) {
-    for (let i = 0; i < SEED_SERVICES.length; i++) {
-      const s = SEED_SERVICES[i];
-      await env.DB.prepare(
-        `INSERT OR IGNORE INTO services
-         (id, title, slug, order_category, short_description, description, features, technologies, suitable_for, image, icon_name, price, currency, is_active, display_order, created_at, updated_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, '', ?, ?, 'INR', 1, ?, ?, ?)`
-      )
-        .bind(
-          s.id,
-          s.title,
-          s.slug,
-          s.orderCategory,
-          s.shortDescription,
-          s.description,
-          JSON.stringify(s.features),
-          JSON.stringify(s.technologies),
-          JSON.stringify(s.suitableFor),
-          s.iconName,
-          s.price,
-          i + 1,
-          now,
-          now
+      if (isValidEmail(rawEmail) && isValidBootstrapPassword(rawPassword, isProduction)) {
+        const passwordHash = await hashPassword(rawPassword);
+        await env.DB.prepare(
+          `INSERT OR IGNORE INTO admins (id, name, email, password_hash, role, is_active, created_at, updated_at, last_login_at)
+           VALUES ('adm-root-1', ?, ?, ?, 'super_admin', 1, ?, ?, NULL)`
         )
-        .run();
+          .bind(adminName, rawEmail, passwordHash, now, now)
+          .run();
+      }
     }
-  }
 
-  // 3. Seed Reference Packages (ONLY when `packages` table is empty)
-  const pkgCountRow = await env.DB.prepare('SELECT COUNT(*) AS cnt FROM packages').first();
-  if (!pkgCountRow || Number(pkgCountRow.cnt) === 0) {
-    for (let i = 0; i < SEED_PACKAGES.length; i++) {
-      const p = SEED_PACKAGES[i];
-      await env.DB.prepare(
-        `INSERT OR IGNORE INTO packages
-         (id, name, category, description, price, currency, pages_count, features, revisions, delivery_estimate, support_duration, hosting_option, maintenance_option, add_ons, service_id, is_active, is_featured, display_order, created_at, updated_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
-      )
-        .bind(
-          p.id,
-          p.name,
-          p.category,
-          p.description,
-          p.price,
-          p.currency,
-          p.pagesCount,
-          JSON.stringify(p.features),
-          p.revisions,
-          p.deliveryEstimate,
-          p.supportDuration,
-          p.hostingOption,
-          p.maintenanceOption,
-          JSON.stringify(p.addOns),
-          p.serviceId,
-          p.isActive,
-          p.isFeatured,
-          i + 1,
-          now,
-          now
+    // 2. Seed Reference Services (ONLY when `services` table is empty)
+    const svcCountRow = await env.DB.prepare('SELECT COUNT(*) AS cnt FROM services').first();
+    if (!svcCountRow || Number(svcCountRow.cnt) === 0) {
+      for (let i = 0; i < SEED_SERVICES.length; i++) {
+        const s = SEED_SERVICES[i];
+        await env.DB.prepare(
+          `INSERT OR IGNORE INTO services
+           (id, title, slug, order_category, short_description, description, features, technologies, suitable_for, image, icon_name, price, currency, is_active, display_order, created_at, updated_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, '', ?, ?, 'INR', 1, ?, ?, ?)`
         )
-        .run();
+          .bind(
+            s.id,
+            s.title,
+            s.slug,
+            s.orderCategory,
+            s.shortDescription,
+            s.description,
+            JSON.stringify(s.features),
+            JSON.stringify(s.technologies),
+            JSON.stringify(s.suitableFor),
+            s.iconName,
+            s.price,
+            i + 1,
+            now,
+            now
+          )
+          .run();
+      }
     }
-  }
 
-  // 4. Seed Reference Portfolio Items (ONLY when `portfolio` table is empty)
-  const portCountRow = await env.DB.prepare('SELECT COUNT(*) AS cnt FROM portfolio').first();
-  if (!portCountRow || Number(portCountRow.cnt) === 0) {
-    for (let i = 0; i < SEED_PORTFOLIO.length; i++) {
-      const proj = SEED_PORTFOLIO[i];
-      await env.DB.prepare(
-        `INSERT OR IGNORE INTO portfolio
-         (id, project_title, slug, short_overview, description, problem_addressed, solution_implemented, category, thumbnail, images, key_features, technologies, project_url, github_url, demo_video_url, status, completion_date, is_sample, is_published, is_featured, display_order, created_at, updated_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, '', '', ?, ?, ?, ?, ?, ?, ?, ?)`
-      )
-        .bind(
-          proj.id,
-          proj.projectTitle,
-          proj.slug,
-          proj.shortOverview,
-          proj.description,
-          proj.problemAddressed,
-          proj.solutionImplemented,
-          proj.category,
-          proj.thumbnail,
-          JSON.stringify(proj.images),
-          JSON.stringify(proj.keyFeatures),
-          JSON.stringify(proj.technologies),
-          proj.projectUrl,
-          proj.status,
-          proj.completionDate,
-          proj.isSample,
-          proj.isPublished,
-          proj.isFeatured,
-          i + 1,
-          now,
-          now
+    // 3. Seed Reference Packages (ONLY when `packages` table is empty)
+    const pkgCountRow = await env.DB.prepare('SELECT COUNT(*) AS cnt FROM packages').first();
+    if (!pkgCountRow || Number(pkgCountRow.cnt) === 0) {
+      for (let i = 0; i < SEED_PACKAGES.length; i++) {
+        const p = SEED_PACKAGES[i];
+        await env.DB.prepare(
+          `INSERT OR IGNORE INTO packages
+           (id, name, category, description, price, currency, pages_count, features, revisions, delivery_estimate, support_duration, hosting_option, maintenance_option, add_ons, service_id, is_active, is_featured, display_order, created_at, updated_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
         )
-        .run();
+          .bind(
+            p.id,
+            p.name,
+            p.category,
+            p.description,
+            p.price,
+            p.currency,
+            p.pagesCount,
+            JSON.stringify(p.features),
+            p.revisions,
+            p.deliveryEstimate,
+            p.supportDuration,
+            p.hostingOption,
+            p.maintenanceOption,
+            JSON.stringify(p.addOns),
+            p.serviceId,
+            p.isActive,
+            p.isFeatured,
+            i + 1,
+            now,
+            now
+          )
+          .run();
+      }
     }
+
+    // 4. Seed Reference Portfolio Items (ONLY when `portfolio` table is empty)
+    const portCountRow = await env.DB.prepare('SELECT COUNT(*) AS cnt FROM portfolio').first();
+    if (!portCountRow || Number(portCountRow.cnt) === 0) {
+      for (let i = 0; i < SEED_PORTFOLIO.length; i++) {
+        const proj = SEED_PORTFOLIO[i];
+        await env.DB.prepare(
+          `INSERT OR IGNORE INTO portfolio
+           (id, project_title, slug, short_overview, description, problem_addressed, solution_implemented, category, thumbnail, images, key_features, technologies, project_url, github_url, demo_video_url, status, completion_date, is_sample, is_published, is_featured, display_order, created_at, updated_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, '', '', ?, ?, ?, ?, ?, ?, ?, ?)`
+        )
+          .bind(
+            proj.id,
+            proj.projectTitle,
+            proj.slug,
+            proj.shortOverview,
+            proj.description,
+            proj.problemAddressed,
+            proj.solutionImplemented,
+            proj.category,
+            proj.thumbnail,
+            JSON.stringify(proj.images),
+            JSON.stringify(proj.keyFeatures),
+            JSON.stringify(proj.technologies),
+            proj.projectUrl,
+            proj.status,
+            proj.completionDate,
+            proj.isSample,
+            proj.isPublished,
+            proj.isFeatured,
+            i + 1,
+            now,
+            now
+          )
+          .run();
+      }
+    }
+
+    // 5. Seed Default Site Settings (using INSERT OR IGNORE so existing settings are never overwritten)
+    await env.DB.prepare(
+      `INSERT OR IGNORE INTO site_settings (setting_key, setting_value, updated_at) VALUES ('general', ?, ?)`
+    )
+      .bind(JSON.stringify(SEED_SETTINGS), now)
+      .run();
+
+    await env.DB.prepare(
+      `INSERT OR IGNORE INTO site_settings (setting_key, setting_value, updated_at) VALUES ('addons', ?, ?)`
+    )
+      .bind(JSON.stringify(SEED_ADDONS), now)
+      .run();
+
+    await env.DB.prepare(
+      `INSERT OR IGNORE INTO site_settings (setting_key, setting_value, updated_at) VALUES ('maintenance_plans', ?, ?)`
+    )
+      .bind(JSON.stringify(SEED_MAINTENANCE_PLANS), now)
+      .run();
+
+    await env.DB.prepare(
+      `INSERT OR IGNORE INTO site_settings (setting_key, setting_value, updated_at) VALUES ('team_members', ?, ?)`
+    )
+      .bind(JSON.stringify(SEED_TEAM), now)
+      .run();
+
+    initializedDatabases.add(env.DB);
+  } catch (err) {
+    const msg = String(err?.message || '');
+    if (/no such table/i.test(msg)) {
+      const schemaErr = new Error(
+        `Database schema is missing required tables (${msg}). Please apply D1 migrations.`
+      );
+      schemaErr.status = 503;
+      schemaErr.code = 'DATABASE_SCHEMA_MISSING';
+      throw schemaErr;
+    }
+    const seedErr = new Error(`Database initialization failed: ${msg}`);
+    seedErr.status = err?.status || 500;
+    seedErr.code = err?.code || 'DATABASE_SEED_ERROR';
+    throw seedErr;
   }
-
-  // 5. Seed Default Site Settings (using INSERT OR IGNORE so existing settings are never overwritten)
-  await env.DB.prepare(
-    `INSERT OR IGNORE INTO site_settings (setting_key, setting_value, updated_at) VALUES ('general', ?, ?)`
-  )
-    .bind(JSON.stringify(SEED_SETTINGS), now)
-    .run();
-
-  await env.DB.prepare(
-    `INSERT OR IGNORE INTO site_settings (setting_key, setting_value, updated_at) VALUES ('addons', ?, ?)`
-  )
-    .bind(JSON.stringify(SEED_ADDONS), now)
-    .run();
-
-  await env.DB.prepare(
-    `INSERT OR IGNORE INTO site_settings (setting_key, setting_value, updated_at) VALUES ('maintenance_plans', ?, ?)`
-  )
-    .bind(JSON.stringify(SEED_MAINTENANCE_PLANS), now)
-    .run();
-
-  await env.DB.prepare(
-    `INSERT OR IGNORE INTO site_settings (setting_key, setting_value, updated_at) VALUES ('team_members', ?, ?)`
-  )
-    .bind(JSON.stringify(SEED_TEAM), now)
-    .run();
-
-  initializedDatabases.add(env.DB);
 }
+

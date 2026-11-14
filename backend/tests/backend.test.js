@@ -4,7 +4,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import workerApp from '../src/index.js';
-import { createNodeWorkerEnv } from '../src/database/d1Adapter.js';
+import { createNodeWorkerEnv, LocalD1Database } from '../src/database/d1Adapter.js';
 import {
   hashPassword,
   verifyPassword,
@@ -643,4 +643,243 @@ describe('DTKS Production Backend Audit & Security Test Suite (/api/v1)', () => 
     assert.equal(updateSettings.json.data.settings.jwtSecret, undefined);
     assert.equal(updateSettings.json.data.settings.resendApiKey, undefined);
   });
+
+  // --------------------------------------------------------------------------
+  // 15. Liveness Health Endpoint (/api/v1/health) Without D1, Unmigrated D1, & With D1
+  // --------------------------------------------------------------------------
+  it('15. Liveness Health Endpoint: Returns HTTP 200 without D1, with unmigrated D1, and with migrated D1', async () => {
+    // Case A: Completely missing D1 and R2 bindings
+    const noBindingsEnv = {
+      ENVIRONMENT: 'production',
+      DB: null,
+      ASSETS_BUCKET: null,
+    };
+    const healthNoDb = await apiRequest('/api/v1/health', { customEnv: noBindingsEnv });
+    assert.equal(healthNoDb.status, 200);
+    assert.equal(healthNoDb.json.success, true);
+    assert.equal(healthNoDb.json.message, 'DTKS API is operational.');
+    assert.equal(healthNoDb.json.data.service, 'DTKS Backend API');
+    assert.equal(healthNoDb.json.data.status, 'healthy');
+    assert.equal(healthNoDb.json.data.version, '1.0.0');
+
+    // Case B: D1 bound to an empty database with zero migrations applied (reproducing the production 500 scenario)
+    const emptyDb = new LocalD1Database(':memory:', []);
+    const unmigratedEnv = {
+      ...env,
+      DB: emptyDb,
+    };
+    const healthUnmigrated = await apiRequest('/api/v1/health', { customEnv: unmigratedEnv });
+    emptyDb.close();
+    assert.equal(healthUnmigrated.status, 200);
+    assert.equal(healthUnmigrated.json.success, true);
+    assert.equal(healthUnmigrated.json.data.status, 'healthy');
+
+    // Case C: D1 bound and fully migrated
+    const healthWithDb = await apiRequest('/api/v1/health');
+    assert.equal(healthWithDb.status, 200);
+    assert.equal(healthWithDb.json.success, true);
+    assert.equal(healthWithDb.json.data.status, 'healthy');
+  });
+
+  // --------------------------------------------------------------------------
+  // 16. Readiness Endpoint (/api/v1/ready) With Valid Bindings, Missing Bindings, & Missing Tables
+  // --------------------------------------------------------------------------
+  it('16. Readiness Endpoint (/api/v1/ready): Verifies D1, schema tables, and R2 storage accurately', async () => {
+    // Case A: All dependencies ready -> HTTP 200
+    const readyRes = await apiRequest('/api/v1/ready');
+    assert.equal(readyRes.status, 200);
+    assert.equal(readyRes.json.success, true);
+    assert.equal(readyRes.json.data.status, 'ready');
+    assert.equal(readyRes.json.data.database, 'connected');
+    assert.equal(readyRes.json.data.schema, 'valid');
+    assert.equal(readyRes.json.data.storage, 'available');
+
+    // Case B: Missing D1 binding -> HTTP 503
+    const missingDbRes = await apiRequest('/api/v1/ready', {
+      customEnv: { ...env, DB: null },
+    });
+    assert.equal(missingDbRes.status, 503);
+    assert.equal(missingDbRes.json.success, false);
+    assert.equal(missingDbRes.json.data.status, 'not_ready');
+    assert.equal(missingDbRes.json.data.database, 'unavailable');
+    assert.equal(missingDbRes.json.data.storage, 'available');
+
+    // Case C: Missing R2 binding -> HTTP 503
+    const missingR2Res = await apiRequest('/api/v1/ready', {
+      customEnv: { ...env, ASSETS_BUCKET: null },
+    });
+    assert.equal(missingR2Res.status, 503);
+    assert.equal(missingR2Res.json.success, false);
+    assert.equal(missingR2Res.json.data.status, 'not_ready');
+    assert.equal(missingR2Res.json.data.database, 'connected');
+    assert.equal(missingR2Res.json.data.schema, 'valid');
+    assert.equal(missingR2Res.json.data.storage, 'unavailable');
+
+    // Case D: Unmigrated database (missing tables) -> HTTP 503 with schema: 'missing_tables'
+    const emptyDb = new LocalD1Database(':memory:', []);
+    const missingTablesRes = await apiRequest('/api/v1/ready', {
+      customEnv: { ...env, DB: emptyDb },
+    });
+    emptyDb.close();
+    assert.equal(missingTablesRes.status, 503);
+    assert.equal(missingTablesRes.json.success, false);
+    assert.equal(missingTablesRes.json.data.status, 'not_ready');
+    assert.equal(missingTablesRes.json.data.database, 'connected');
+    assert.equal(missingTablesRes.json.data.schema, 'missing_tables');
+    assert.equal(missingTablesRes.json.data.storage, 'available');
+  });
+
+  // --------------------------------------------------------------------------
+  // 17. Missing Tables, Database Query Failures, Seeding Errors & Rate Limiter Fault Tolerance
+  // --------------------------------------------------------------------------
+  it('17. Fault Handling: Handles missing tables, D1 query failures, seed errors, and rate limiter DB failures safely', async () => {
+    // A. Missing database tables on a DB-dependent route -> 503 DATABASE_SCHEMA_MISSING
+    const unmigratedDb = new LocalD1Database(':memory:', []);
+    const missingSchemaRes = await apiRequest('/api/v1/services', {
+      customEnv: { ...env, DB: unmigratedDb },
+    });
+    unmigratedDb.close();
+    assert.equal(missingSchemaRes.status, 503);
+    assert.equal(missingSchemaRes.json.success, false);
+    assert.equal(missingSchemaRes.json.error.code, 'DATABASE_SCHEMA_MISSING');
+    assert.ok(missingSchemaRes.headers.get('X-Request-Id'));
+    assert.equal(missingSchemaRes.json.error.stack, undefined);
+
+    // B. Database seeding error (non-schema failure inside ensureDatabaseSeeded)
+    const failingSeedDb = {
+      prepare() {
+        return {
+          bind() {
+            return this;
+          },
+          async first() {
+            throw new Error('Simulated D1 connection reset during seed');
+          },
+          async run() {
+            throw new Error('Simulated D1 connection reset during seed');
+          },
+          async all() {
+            throw new Error('Simulated D1 connection reset during seed');
+          },
+        };
+      },
+    };
+    const seedFailRes = await apiRequest('/api/v1/services', {
+      customEnv: { ...env, DB: failingSeedDb },
+    });
+    assert.equal(seedFailRes.status, 500);
+    assert.equal(seedFailRes.json.success, false);
+    assert.equal(seedFailRes.json.error.code, 'DATABASE_SEED_ERROR');
+    assert.ok(seedFailRes.headers.get('X-Request-Id'));
+    assert.equal(seedFailRes.json.error.stack, undefined);
+
+    // C. Database query failure after seed ( coupled with Rate Limiter D1 fallback )
+    const queryFailDb = {
+      prepare(sql) {
+        return {
+          bind() {
+            return this;
+          },
+          async first() {
+            if (/rate_limits/i.test(sql)) {
+              throw new Error('D1_ERROR: rate_limits table busy');
+            }
+            return { cnt: 1 };
+          },
+          async run() {
+            if (/rate_limits/i.test(sql)) {
+              throw new Error('D1_ERROR: rate_limits table busy');
+            }
+            return { success: true };
+          },
+          async all() {
+            if (/FROM services/i.test(sql)) {
+              throw new Error('D1_ERROR: simulated query failure on services table');
+            }
+            return { results: [] };
+          },
+        };
+      },
+    };
+    await ensureDatabaseSeeded({ ...env, DB: queryFailDb });
+    const queryFailRes = await apiRequest('/api/v1/services', {
+      customEnv: { ...env, DB: queryFailDb },
+    });
+    assert.equal(queryFailRes.status, 500);
+    assert.equal(queryFailRes.json.success, false);
+    assert.equal(queryFailRes.json.error.code, 'DATABASE_ERROR');
+    assert.ok(queryFailRes.headers.get('X-Request-Id'));
+    assert.equal(queryFailRes.json.error.stack, undefined);
+  });
+
+  // --------------------------------------------------------------------------
+  // 18. Full Website Bootstrap, Admin Analytics, Customer Management & Password Change
+  // --------------------------------------------------------------------------
+  it('18. End-to-End Website Bootstrap, Admin Dashboard Stats, Customers & Password Change: Works with real D1 data', async () => {
+    await resetRateLimiter(env);
+
+    // 1. Public bootstrap endpoint
+    const bootstrapRes = await apiRequest('/api/v1/bootstrap');
+    assert.equal(bootstrapRes.status, 200);
+    assert.equal(bootstrapRes.json.success, true);
+    assert.ok(Array.isArray(bootstrapRes.json.data.services));
+    assert.ok(Array.isArray(bootstrapRes.json.data.packages));
+    assert.ok(Array.isArray(bootstrapRes.json.data.portfolio));
+    assert.ok(bootstrapRes.json.data.settings.companyName);
+
+    // 2. Admin Dashboard Statistics, Recent Orders, Recent Messages & Order Analytics
+    const statsRes = await apiRequest('/api/v1/admin/dashboard/stats', { token: accessToken });
+    assert.equal(statsRes.status, 200);
+    assert.ok(statsRes.json.data.stats.totalOrders >= 1);
+    assert.ok(statsRes.json.data.stats.totalCustomers >= 1);
+    assert.ok(statsRes.json.data.stats.totalInquiries >= 1);
+
+    const recentOrdersRes = await apiRequest('/api/v1/admin/dashboard/recent-orders?limit=5', {
+      token: accessToken,
+    });
+    assert.equal(recentOrdersRes.status, 200);
+    assert.ok(recentOrdersRes.json.data.recentOrders.length >= 1);
+
+    const recentMessagesRes = await apiRequest('/api/v1/admin/dashboard/recent-messages?limit=5', {
+      token: accessToken,
+    });
+    assert.equal(recentMessagesRes.status, 200);
+    assert.ok(recentMessagesRes.json.data.recentMessages.length >= 1);
+
+    const analyticsRes = await apiRequest('/api/v1/admin/dashboard/order-analytics', {
+      token: accessToken,
+    });
+    assert.equal(analyticsRes.status, 200);
+    assert.ok(Array.isArray(analyticsRes.json.data.analytics.byStatus));
+
+    // 3. Admin Customers list
+    const customersRes = await apiRequest('/api/v1/customers', { token: accessToken });
+    assert.equal(customersRes.status, 200);
+    assert.ok(customersRes.json.data.customers.length >= 1);
+
+    // 4. Admin Password Change & Verification
+    const newPassword = 'UpdatedStrongPass#2026!';
+    const changePwRes = await apiRequest('/api/v1/auth/change-password', {
+      method: 'POST',
+      token: accessToken,
+      body: {
+        currentPassword: TEST_ADMIN_PASSWORD,
+        newPassword,
+      },
+    });
+    assert.equal(changePwRes.status, 200);
+    assert.equal(changePwRes.json.data.updated, true);
+
+    // Verify login with new password works
+    const reloginRes = await apiRequest('/api/v1/auth/login', {
+      method: 'POST',
+      body: {
+        email: TEST_ADMIN_EMAIL,
+        password: newPassword,
+      },
+    });
+    assert.equal(reloginRes.status, 200);
+    assert.ok(reloginRes.json.data.accessToken);
+  });
 });
+

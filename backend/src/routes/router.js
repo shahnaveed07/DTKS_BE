@@ -3,9 +3,9 @@ import { isOriginAllowed } from '../config/cors.js';
 import { applySecurityAndCorsHeaders } from '../middleware/securityHeaders.js';
 import { checkRateLimit } from '../middleware/rateLimiter.js';
 import { authenticateAdmin } from '../middleware/authMiddleware.js';
-import { handleException } from '../middleware/errorHandler.js';
-import { successResponse, errorResponse, parseJsonBody } from '../utils/response.js';
-import { ensureDatabaseSeeded } from '../database/seed.js';
+import { handleException, logServerError } from '../middleware/errorHandler.js';
+import { jsonResponse, successResponse, errorResponse, parseJsonBody } from '../utils/response.js';
+import { ensureDatabaseSeeded, verifyDatabaseSchema } from '../database/seed.js';
 import { serveImageFromR2 } from '../services/storageService.js';
 
 import {
@@ -100,6 +100,80 @@ function matchPath(pattern, pathname) {
   return params;
 }
 
+/**
+ * Evaluates production dependency readiness (`GET /api/v1/ready`):
+ *   - D1 binding (`env.DB`) exists and responds to a connectivity probe
+ *   - All 13 required relational tables exist in D1
+ *   - R2 storage binding (`env.ASSETS_BUCKET`) is available
+ * Never exposes secrets, raw SQL queries, or internal credentials.
+ */
+async function handleReadinessCheck(request, env) {
+  let databaseStatus = 'unavailable';
+  let schemaStatus = 'unavailable';
+  let storageStatus = 'unavailable';
+
+  // 1. Check R2 Storage Binding
+  if (
+    env?.ASSETS_BUCKET &&
+    typeof env.ASSETS_BUCKET.get === 'function' &&
+    typeof env.ASSETS_BUCKET.put === 'function'
+  ) {
+    storageStatus = 'available';
+  }
+
+  // 2. Check D1 Binding, Connectivity, and Required Tables
+  if (env?.DB && typeof env.DB.prepare === 'function') {
+    try {
+      const probe = await env.DB.prepare('SELECT 1 AS ok').first();
+      if (probe && Number(probe.ok) === 1) {
+        databaseStatus = 'connected';
+        const schemaCheck = await verifyDatabaseSchema(env.DB);
+        schemaStatus = schemaCheck.valid ? 'valid' : 'missing_tables';
+      }
+    } catch (err) {
+      logServerError(err, request, { phase: 'readiness_check' });
+      databaseStatus = 'unavailable';
+      schemaStatus = 'unavailable';
+    }
+  }
+
+  const isReady =
+    databaseStatus === 'connected' &&
+    schemaStatus === 'valid' &&
+    storageStatus === 'available';
+
+  if (isReady) {
+    return successResponse(
+      {
+        status: 'ready',
+        database: databaseStatus,
+        schema: schemaStatus,
+        storage: storageStatus,
+      },
+      'DTKS Backend API dependencies are ready.',
+      200
+    );
+  }
+
+  return jsonResponse(
+    {
+      success: false,
+      error: {
+        code: 'SERVICE_NOT_READY',
+        message: 'One or more required backend dependencies are unavailable.',
+      },
+      data: {
+        status: 'not_ready',
+        database: databaseStatus,
+        schema: schemaStatus,
+        storage: storageStatus,
+      },
+      timestamp: new Date().toISOString(),
+    },
+    503
+  );
+}
+
 export async function handleApiRequest(request, env) {
   const method = request.method.toUpperCase();
   const url = new URL(request.url);
@@ -118,7 +192,29 @@ export async function handleApiRequest(request, env) {
     return applySecurityAndCorsHeaders(preflight, request, env);
   }
 
-  // 3. Distributed General API Rate Limit Check
+  // 3. Liveness Endpoint (`GET /api/v1/health`)
+  // Strictly isolated from D1, R2, database seeding, migrations, and DB-backed rate limiting.
+  if (pathname === `${API_PREFIX}/health` && method === 'GET') {
+    const livenessRes = successResponse(
+      {
+        service: 'DTKS Backend API',
+        status: 'healthy',
+        version: '1.0.0',
+      },
+      'DTKS API is operational.',
+      200
+    );
+    return applySecurityAndCorsHeaders(livenessRes, request, env);
+  }
+
+  // 4. Readiness Endpoint (`GET /api/v1/ready`)
+  // Verifies D1 binding, D1 connectivity, schema tables, and R2 binding before seeding.
+  if (pathname === `${API_PREFIX}/ready` && method === 'GET') {
+    const readinessRes = await handleReadinessCheck(request, env);
+    return applySecurityAndCorsHeaders(readinessRes, request, env);
+  }
+
+  // 5. Distributed General API Rate Limit Check
   const generalRate = await checkRateLimit(request, 'generalApi', env);
   if (!generalRate.allowed) {
     return applySecurityAndCorsHeaders(generalRate.response, request, env);
@@ -129,19 +225,6 @@ export async function handleApiRequest(request, env) {
     await ensureDatabaseSeeded(env);
 
     let response = null;
-
-    // Health check endpoint
-    if (pathname === `${API_PREFIX}/health` && method === 'GET') {
-      response = successResponse(
-        {
-          service: 'DTKS Backend API',
-          status: 'healthy',
-          version: '1.0.0',
-        },
-        'DTKS API is operational.'
-      );
-      return applySecurityAndCorsHeaders(response, request, env);
-    }
 
     // Public Bootstrap endpoint
     if (pathname === `${API_PREFIX}/bootstrap` && method === 'GET') {
@@ -591,7 +674,7 @@ export async function handleApiRequest(request, env) {
     );
     return applySecurityAndCorsHeaders(notFound, request, env);
   } catch (err) {
-    const errRes = handleException(err);
+    const errRes = handleException(err, request);
     return applySecurityAndCorsHeaders(errRes, request, env);
   }
 }

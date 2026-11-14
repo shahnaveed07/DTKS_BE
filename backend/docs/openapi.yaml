@@ -143,11 +143,20 @@ components:
 paths:
   /health:
     get:
-      summary: Health Check
+      summary: Worker Liveness Check (Independent of D1/R2)
       tags: [System]
       responses:
         '200':
-          description: API is operational
+          description: Worker is running and operational
+  /ready:
+    get:
+      summary: Infrastructure Readiness Check (Verifies D1 Connection, 13 Schema Tables & R2 Storage)
+      tags: [System]
+      responses:
+        '200':
+          description: D1 database, schema tables, and R2 storage are ready
+        '503':
+          description: One or more required dependencies (D1, schema tables, or R2) are not ready
   /auth/login:
     post:
       summary: Admin Login

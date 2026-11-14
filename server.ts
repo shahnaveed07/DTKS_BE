@@ -26,10 +26,11 @@ async function startServer() {
       success: true,
       message: 'DTKS_BE — DreamTech Kashmir Solutions Standalone Backend API',
       data: {
-        service: 'dtks-backend-api',
+        service: 'dtks-be',
         version: '1.0.0',
         apiBasePath: '/api/v1',
         healthEndpoint: '/api/v1/health',
+        readinessEndpoint: '/api/v1/ready',
         bootstrapEndpoint: '/api/v1/bootstrap',
         frontendRepository: 'https://github.com/shahnaveed07/DTKS.git',
         productionWebsite: 'https://dreamtechkashmirsolutions.studio/',

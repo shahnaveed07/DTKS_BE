@@ -11,10 +11,21 @@
 
 | Environment | Base URL |
 | :--- | :--- |
-| **Production (Cloudflare Workers)** | `https://api.dreamtechkashmirsolutions.studio/api/v1` |
+| **Production Custom API Domain** | `https://api.dreamtechkashmirsolutions.studio/api/v1` |
+| **Production Worker Direct URL** | `https://dtks-be.snave9401.workers.dev/api/v1` |
 | **Same-Origin Production Route** | `https://dreamtechkashmirsolutions.studio/api/v1` |
 | **Local Cloudflare Worker (`wrangler dev`)** | `http://localhost:8787/api/v1` |
 | **Local Integrated Dev Server** | `http://localhost:3000/api/v1` |
+
+---
+
+## 1.1 Health & Readiness Probes
+
+| Method | Endpoint | Purpose | Success Status | Failure Status |
+| :--- | :--- | :--- | :--- | :--- |
+| `GET` | `/api/v1/health` | **Liveness Check** — Verifies the Worker is running without touching D1, R2, seeding, or DB rate limiting | `200 OK` (`status: "healthy"`) | N/A |
+| `GET` | `/api/v1/ready` | **Readiness Check** — Verifies D1 binding, D1 connection, all 13 schema tables, and R2 `ASSETS_BUCKET` binding | `200 OK` (`status: "ready"`, `database: "connected"`, `schema: "valid"`, `storage: "available"`) | `503 Service Unavailable` (`status: "not_ready"`) |
+
 
 ---
 
