@@ -50,7 +50,7 @@ backend/
 │   ├── 0001_initial_schema.sql   # 13 relational D1 tables, foreign keys, CHECK constraints & indexes
 │   └── 0002_seed_data.sql        # Non-destructive initial site settings migration (INSERT OR IGNORE)
 ├── tests/
-│   └── backend.test.js           # 14 comprehensive security, RBAC, CRUD & persistence test suites
+│   └── backend.test.js           # 19 comprehensive security, RBAC, CRUD, R2 & fault-handling test suites
 ├── docs/
 │   ├── API_DOCUMENTATION.md      # Complete REST API reference & frontend integration guide
 │   ├── openapi.yaml              # OpenAPI 3.0.3 specification
@@ -74,7 +74,7 @@ backend/
    - Refresh tokens are stored as SHA-256 hashes in `refresh_sessions`, rotated on every `/api/v1/auth/refresh` call, and immediately revoked on logout or password change.
 4. **Role-Based Access Control (RBAC)**:
    - `super_admin` & `admin`: Full access to all administrative endpoints, including `DELETE` operations, site settings updates (`PUT /api/v1/settings`), package add-on/maintenance config updates, and audit logs (`GET /api/v1/admin/activity-logs`).
-   - `editor`: Permitted to create and update services, packages, portfolio items, orders, and contact inquiries, but restricted (`403 Forbidden`) from deleting records, modifying global site settings, or viewing system audit logs.
+   - `editor`: Permitted to create and update services, packages, portfolio items, R2 uploads, orders, and contact inquiries, but restricted (`403 Forbidden`) from deleting records or R2 objects, modifying global site settings, or viewing system audit logs.
 5. **Distributed Rate Limiting**:
    - Backed by the Cloudflare D1 `rate_limits` table across Worker isolates (and optional Cloudflare native `RATE_LIMITER` binding), with automatic fallback for local testing.
 
@@ -123,31 +123,40 @@ npx wrangler dev
 
 ---
 
-## 5. Production Cloudflare Deployment
+## 5. Production Cloudflare Deployment (`dtks-be`)
 
-### Step 1: Create D1 Database & R2 Bucket
+- **Worker Name**: `dtks-be`
+- **Production Worker URL**: `https://dtks-be.snave9401.workers.dev`
+- **Custom API Domain**: `https://api.dreamtechkashmirsolutions.studio`
+- **D1 Database**: `dtks-production-db` (`be0ce24a-0151-412f-b308-1271bb62abba`, Binding: `DB`)
+- **R2 Bucket**: `dtks-portfolio-assets` (Binding: `ASSETS_BUCKET`)
+
+### Step 1: Apply D1 Database Migrations (Non-Destructive)
 ```bash
 cd backend
-npx wrangler d1 create dtks-production-db
-npx wrangler r2 bucket create dtks-portfolio-assets
-```
-Replace `"REPLACE_WITH_CLOUDFLARE_D1_DATABASE_ID"` in `backend/wrangler.toml` with the ID returned by Wrangler.
-
-### Step 2: Apply D1 Database Migrations
-```bash
 npx wrangler d1 migrations apply dtks-production-db --remote
 ```
 
-### Step 3: Configure Standardized Production Secrets
+### Step 2: Configure Production Secrets
 ```bash
-npx wrangler secret put JWT_SECRET --env production
-npx wrangler secret put INITIAL_ADMIN_EMAIL --env production
-npx wrangler secret put INITIAL_ADMIN_PASSWORD --env production
-npx wrangler secret put INITIAL_ADMIN_NAME --env production
-npx wrangler secret put RESEND_API_KEY --env production
+cd backend
+npx wrangler secret put JWT_SECRET
+npx wrangler secret put INITIAL_ADMIN_EMAIL
+npx wrangler secret put INITIAL_ADMIN_PASSWORD
+npx wrangler secret put INITIAL_ADMIN_NAME
+npx wrangler secret put RESEND_API_KEY
 ```
 
-### Step 4: Deploy Worker
+### Step 3: Deploy Worker
 ```bash
-npx wrangler deploy --env production
+cd backend
+npx wrangler deploy
+```
+
+### Step 4: Verify Liveness & Readiness
+```bash
+curl -i https://dtks-be.snave9401.workers.dev/api/v1/health
+curl -i https://dtks-be.snave9401.workers.dev/api/v1/ready
+curl -i https://api.dreamtechkashmirsolutions.studio/api/v1/health
+curl -i https://api.dreamtechkashmirsolutions.studio/api/v1/ready
 ```

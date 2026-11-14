@@ -7,6 +7,7 @@ import {
   sanitizeText,
 } from '../utils/response.js';
 import { logAdminActivity } from '../services/auditService.js';
+import { authenticateAdmin } from '../middleware/authMiddleware.js';
 import { mapServiceRow } from './servicesController.js';
 import { mapPackageRow } from './packagesController.js';
 import { mapPortfolioRow } from './portfolioController.js';
@@ -312,12 +313,36 @@ export async function deleteTestimonial(request, env, admin, id) {
 
 /**
  * Public Bootstrap Endpoint: returns all public website catalog & configuration data in one fast query.
+ * Unauthenticated requests receive only active services, active packages, and published portfolio items.
  */
 export async function getPublicBootstrap(request, env) {
+  const url = new URL(request.url);
+  const wantsAll =
+    url.searchParams.get('includeInactive') === 'true' ||
+    url.searchParams.get('all') === 'true';
+
+  let showAll = false;
+  if (wantsAll) {
+    const auth = await authenticateAdmin(request, env);
+    if (auth.authenticated) {
+      showAll = true;
+    }
+  }
+
+  const servicesSql = showAll
+    ? 'SELECT * FROM services ORDER BY display_order ASC, created_at ASC'
+    : 'SELECT * FROM services WHERE is_active = 1 ORDER BY display_order ASC, created_at ASC';
+  const packagesSql = showAll
+    ? 'SELECT * FROM packages ORDER BY display_order ASC, created_at ASC'
+    : 'SELECT * FROM packages WHERE is_active = 1 ORDER BY display_order ASC, created_at ASC';
+  const portfolioSql = showAll
+    ? 'SELECT * FROM portfolio ORDER BY display_order ASC, created_at DESC'
+    : 'SELECT * FROM portfolio WHERE is_published = 1 ORDER BY display_order ASC, created_at DESC';
+
   const [servicesRes, packagesRes, portfolioRes, settingsRows] = await Promise.all([
-    env.DB.prepare('SELECT * FROM services ORDER BY display_order ASC, created_at ASC').all(),
-    env.DB.prepare('SELECT * FROM packages ORDER BY display_order ASC, created_at ASC').all(),
-    env.DB.prepare('SELECT * FROM portfolio ORDER BY display_order ASC, created_at DESC').all(),
+    env.DB.prepare(servicesSql).all(),
+    env.DB.prepare(packagesSql).all(),
+    env.DB.prepare(portfolioSql).all(),
     env.DB.prepare('SELECT setting_key, setting_value FROM site_settings').all(),
   ]);
 

@@ -154,12 +154,17 @@ export async function createService(request, env, admin) {
   return successResponse({ service: mapServiceRow(created) }, 'Service created successfully.', 201);
 }
 
-export async function updateService(request, env, admin, id) {
-  const existing = await env.DB.prepare('SELECT * FROM services WHERE id = ?').bind(id).first();
+export async function updateService(request, env, admin, slugOrId) {
+  const existing = await env.DB.prepare(
+    'SELECT * FROM services WHERE id = ? OR slug = ? LIMIT 1'
+  )
+    .bind(slugOrId, slugOrId)
+    .first();
   if (!existing) {
     return errorResponse('Service not found.', 404, 'NOT_FOUND');
   }
 
+  const serviceId = existing.id;
   const body = await parseJsonBody(request);
   const current = mapServiceRow(existing);
   const merged = {
@@ -197,7 +202,7 @@ export async function updateService(request, env, admin, id) {
   const d = validation.data;
   let slug = body.slug ? slugifyText(body.slug) : existing.slug;
   const slugConflict = await env.DB.prepare('SELECT id FROM services WHERE slug = ? AND id != ?')
-    .bind(slug, id)
+    .bind(slug, serviceId)
     .first();
   if (slugConflict) {
     slug = `${slug}-${Math.random().toString(36).slice(2, 6)}`;
@@ -227,17 +232,19 @@ export async function updateService(request, env, admin, id) {
       d.isActive ? 1 : 0,
       d.displayOrder,
       now,
-      id
+      serviceId
     )
     .run();
 
-  const updated = await env.DB.prepare('SELECT * FROM services WHERE id = ?').bind(id).first();
+  const updated = await env.DB.prepare('SELECT * FROM services WHERE id = ?')
+    .bind(serviceId)
+    .first();
 
   await logAdminActivity(env, {
     adminId: admin.id,
     action: 'UPDATE_SERVICE',
     entityType: 'Service',
-    entityId: id,
+    entityId: serviceId,
     details: `Updated service "${d.title}"`,
     request,
   });
@@ -245,22 +252,27 @@ export async function updateService(request, env, admin, id) {
   return successResponse({ service: mapServiceRow(updated) }, 'Service updated successfully.');
 }
 
-export async function deleteService(request, env, admin, id) {
-  const existing = await env.DB.prepare('SELECT * FROM services WHERE id = ?').bind(id).first();
+export async function deleteService(request, env, admin, slugOrId) {
+  const existing = await env.DB.prepare(
+    'SELECT * FROM services WHERE id = ? OR slug = ? LIMIT 1'
+  )
+    .bind(slugOrId, slugOrId)
+    .first();
   if (!existing) {
     return errorResponse('Service not found.', 404, 'NOT_FOUND');
   }
 
-  await env.DB.prepare('DELETE FROM services WHERE id = ?').bind(id).run();
+  const serviceId = existing.id;
+  await env.DB.prepare('DELETE FROM services WHERE id = ?').bind(serviceId).run();
 
   await logAdminActivity(env, {
     adminId: admin.id,
     action: 'DELETE_SERVICE',
     entityType: 'Service',
-    entityId: id,
+    entityId: serviceId,
     details: `Deleted service "${existing.title}"`,
     request,
   });
 
-  return successResponse({ deletedId: id }, 'Service deleted successfully.');
+  return successResponse({ deletedId: serviceId }, 'Service deleted successfully.');
 }

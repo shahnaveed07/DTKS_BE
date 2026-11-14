@@ -25,6 +25,7 @@ export const VALID_ORDER_STATUSES = [
 
 export const VALID_CONTACT_STATUSES = [
   'New',
+  'Read',
   'In Review',
   'Replied',
   'Archived',

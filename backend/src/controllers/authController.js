@@ -146,12 +146,16 @@ export async function loginAdmin(request, env) {
     request,
   });
 
+  const csrfToken = generateRandomToken(16);
+
   return successResponse(
     {
       accessToken,
       access_token: accessToken,
       refreshToken: rawRefreshToken,
       refresh_token: rawRefreshToken,
+      csrfToken,
+      csrf_token: csrfToken,
       expiresIn: accessExp,
       expires_in: accessExp,
       admin: mapAdminResponse(admin, now),
@@ -162,7 +166,19 @@ export async function loginAdmin(request, env) {
 
 export async function logoutAdmin(request, env, currentAdmin) {
   const body = await parseJsonBody(request).catch(() => ({}));
-  const rawToken = body.refreshToken || body.refresh_token;
+  const rawToken =
+    typeof (body.refreshToken || body.refresh_token) === 'string'
+      ? (body.refreshToken || body.refresh_token).trim()
+      : '';
+
+  if (!rawToken && !currentAdmin?.id) {
+    return errorResponse(
+      'Authentication or refresh token is required to log out.',
+      401,
+      'UNAUTHORIZED'
+    );
+  }
+
   const now = new Date().toISOString();
 
   if (rawToken) {
@@ -273,12 +289,16 @@ export async function refreshAdminToken(request, env) {
     )
     .run();
 
+  const csrfToken = generateRandomToken(16);
+
   return successResponse(
     {
       accessToken: newAccessToken,
       access_token: newAccessToken,
       refreshToken: newRawRefreshToken,
       refresh_token: newRawRefreshToken,
+      csrfToken,
+      csrf_token: csrfToken,
       expiresIn: accessExp,
       expires_in: accessExp,
       admin: mapAdminResponse(admin),

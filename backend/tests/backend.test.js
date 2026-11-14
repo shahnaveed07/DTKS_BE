@@ -880,6 +880,186 @@ describe('DTKS Production Backend Audit & Security Test Suite (/api/v1)', () => 
     });
     assert.equal(reloginRes.status, 200);
     assert.ok(reloginRes.json.data.accessToken);
+    assert.ok(reloginRes.json.data.csrfToken);
+    accessToken = reloginRes.json.data.accessToken;
+    refreshToken = reloginRes.json.data.refreshToken;
+  });
+
+  // --------------------------------------------------------------------------
+  // 19. R2 Asset Replacement, R2 Fault Handling, Slug-Based CRUD, Bootstrap Filtering & Logout Revocation
+  // --------------------------------------------------------------------------
+  it('19. R2 Asset Replacement, R2 Fault Handling, Slug-Based CRUD, Public Bootstrap Filtering & Logout: Works end-to-end', async () => {
+    await resetRateLimiter(env);
+
+    // 1. Upload initial image via JSON base64 and then replace it via replaceKey
+    const firstUploadRes = await apiRequest('/api/v1/portfolio/upload', {
+      method: 'POST',
+      token: accessToken,
+      body: {
+        fileName: 'first-banner.png',
+        mimeType: 'image/png',
+        folder: 'portfolio',
+        base64Data: VALID_PNG_BYTES.toString('base64'),
+      },
+    });
+    assert.equal(firstUploadRes.status, 201);
+    const firstKey = firstUploadRes.json.data.key;
+
+    const replaceUploadRes = await apiRequest('/api/v1/portfolio/upload', {
+      method: 'POST',
+      token: accessToken,
+      body: {
+        fileName: 'second-banner.png',
+        mimeType: 'image/png',
+        folder: 'portfolio',
+        replaceKey: firstKey,
+        base64Data: VALID_PNG_BYTES.toString('base64'),
+      },
+    });
+    assert.equal(replaceUploadRes.status, 201);
+    const secondKey = replaceUploadRes.json.data.key;
+    assert.equal(replaceUploadRes.json.data.replacedKey, firstKey);
+
+    // Old R2 key must return 404 now that it was replaced, while new key returns 200 on both /uploads/ and /assets/
+    const oldAssetGet = await apiRequest(`/api/v1/uploads/${firstKey}`);
+    assert.equal(oldAssetGet.status, 404);
+    const newAssetGet = await apiRequest(`/api/v1/assets/${secondKey}`);
+    assert.equal(newAssetGet.status, 200);
+
+    // 2. Editor cannot delete R2 assets (403 FORBIDDEN), and empty key returns 400 INVALID_ASSET_KEY
+    const editorToken = await signJwt(
+      {
+        sub: 'adm-editor-1',
+        email: 'editor@dreamtechkashmirsolutions.studio',
+        role: 'editor',
+        type: 'access',
+      },
+      TEST_JWT_SECRET,
+      900
+    );
+    const editorDelAsset = await apiRequest('/api/v1/portfolio/upload', {
+      method: 'DELETE',
+      token: editorToken,
+      body: { key: secondKey },
+    });
+    assert.equal(editorDelAsset.status, 403);
+
+    const emptyKeyDel = await apiRequest('/api/v1/portfolio/upload', {
+      method: 'DELETE',
+      token: accessToken,
+      body: { key: '' },
+    });
+    assert.equal(emptyKeyDel.status, 400);
+    assert.equal(emptyKeyDel.json.error.code, 'INVALID_ASSET_KEY');
+
+    // Clean up secondKey via path parameter DELETE /api/v1/portfolio/upload/:key
+    const validDelAsset = await apiRequest(`/api/v1/portfolio/upload/${secondKey}`, {
+      method: 'DELETE',
+      token: accessToken,
+    });
+    assert.equal(validDelAsset.status, 200);
+    assert.equal(validDelAsset.json.data.deletedKey, secondKey);
+
+    // 3. Missing R2 bucket returns 503 STORAGE_UNAVAILABLE; throwing R2 bucket returns 502 R2_STORAGE_ERROR
+    const noR2Upload = await apiRequest('/api/v1/portfolio/upload', {
+      method: 'POST',
+      token: accessToken,
+      customEnv: { ...env, ASSETS_BUCKET: null },
+      body: {
+        fileName: 'fail.png',
+        mimeType: 'image/png',
+        base64Data: VALID_PNG_BYTES.toString('base64'),
+      },
+    });
+    assert.equal(noR2Upload.status, 503);
+    assert.equal(noR2Upload.json.error.code, 'STORAGE_UNAVAILABLE');
+
+    const failingR2Bucket = {
+      async put() {
+        throw new Error('R2 network write timeout');
+      },
+      async get() {
+        throw new Error('R2 network read timeout');
+      },
+      async delete() {
+        throw new Error('R2 network delete timeout');
+      },
+    };
+    const r2WriteErr = await apiRequest('/api/v1/portfolio/upload', {
+      method: 'POST',
+      token: accessToken,
+      customEnv: { ...env, ASSETS_BUCKET: failingR2Bucket },
+      body: {
+        fileName: 'fail.png',
+        mimeType: 'image/png',
+        base64Data: VALID_PNG_BYTES.toString('base64'),
+      },
+    });
+    assert.equal(r2WriteErr.status, 502);
+    assert.equal(r2WriteErr.json.error.code, 'R2_STORAGE_ERROR');
+
+    // 4. Slug-based update/delete and Public Bootstrap filtering of inactive/unpublished items
+    const createInactiveSvc = await apiRequest('/api/v1/services', {
+      method: 'POST',
+      token: accessToken,
+      body: {
+        title: 'Internal Draft Service',
+        slug: 'internal-draft-service',
+        short_description: 'Draft service not visible on public bootstrap.',
+        description: 'Detailed description for internal draft service.',
+        price: 15000,
+        is_active: false,
+      },
+    });
+    assert.equal(createInactiveSvc.status, 201);
+
+    // Public bootstrap must NOT include inactive service
+    const pubBoot = await apiRequest('/api/v1/bootstrap');
+    assert.equal(pubBoot.status, 200);
+    assert.ok(!pubBoot.json.data.services.some((s) => s.slug === 'internal-draft-service'));
+
+    // Admin bootstrap with ?includeInactive=true MUST include it
+    const admBoot = await apiRequest('/api/v1/bootstrap?includeInactive=true', {
+      token: accessToken,
+    });
+    assert.equal(admBoot.status, 200);
+    assert.ok(admBoot.json.data.services.some((s) => s.slug === 'internal-draft-service'));
+
+    // Update and delete service by slug
+    const updateBySlug = await apiRequest('/api/v1/services/internal-draft-service', {
+      method: 'PATCH',
+      token: accessToken,
+      body: { price: 17500 },
+    });
+    assert.equal(updateBySlug.status, 200);
+    assert.equal(updateBySlug.json.data.service.price, 17500);
+
+    const deleteBySlug = await apiRequest('/api/v1/services/internal-draft-service', {
+      method: 'DELETE',
+      token: accessToken,
+    });
+    assert.equal(deleteBySlug.status, 200);
+
+    // 5. Logout validation & refresh session revocation
+    const unauthLogout = await apiRequest('/api/v1/auth/logout', {
+      method: 'POST',
+      body: {},
+    });
+    assert.equal(unauthLogout.status, 401);
+
+    const authLogout = await apiRequest('/api/v1/auth/logout', {
+      method: 'POST',
+      token: accessToken,
+      body: { refreshToken },
+    });
+    assert.equal(authLogout.status, 200);
+    assert.equal(authLogout.json.data.loggedOut, true);
+
+    const refreshAfterLogout = await apiRequest('/api/v1/auth/refresh', {
+      method: 'POST',
+      body: { refreshToken },
+    });
+    assert.equal(refreshAfterLogout.status, 401);
   });
 });
 

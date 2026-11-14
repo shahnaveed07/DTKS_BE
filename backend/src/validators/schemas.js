@@ -533,7 +533,14 @@ export function validateImageUpload({ mimeType, sizeBytes, bytes }) {
   }
 
   // Magic byte header verification when raw bytes are provided
-  if (bytes instanceof Uint8Array && bytes.length >= 4) {
+  if (bytes !== undefined && bytes !== null) {
+    if (!(bytes instanceof Uint8Array) || bytes.length < 4) {
+      return {
+        isValid: false,
+        error: 'File binary signature does not match a valid JPEG, PNG, or WebP image.',
+      };
+    }
+
     const isJpeg = bytes[0] === 0xff && bytes[1] === 0xd8 && bytes[2] === 0xff;
     const isPng =
       bytes[0] === 0x89 && bytes[1] === 0x50 && bytes[2] === 0x4e && bytes[3] === 0x47;

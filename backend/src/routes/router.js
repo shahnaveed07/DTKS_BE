@@ -232,9 +232,16 @@ export async function handleApiRequest(request, env) {
       return applySecurityAndCorsHeaders(response, request, env);
     }
 
-    // Serve uploaded R2 assets: GET /api/v1/uploads/:folder/:filename
-    if (pathname.startsWith(`${API_PREFIX}/uploads/`) && method === 'GET') {
-      const key = pathname.slice(`${API_PREFIX}/uploads/`.length);
+    // Serve uploaded R2 assets: GET /api/v1/uploads/:folder/:filename or GET /api/v1/assets/:folder/:filename
+    if (
+      (pathname.startsWith(`${API_PREFIX}/uploads/`) ||
+        pathname.startsWith(`${API_PREFIX}/assets/`)) &&
+      method === 'GET'
+    ) {
+      const prefix = pathname.startsWith(`${API_PREFIX}/uploads/`)
+        ? `${API_PREFIX}/uploads/`
+        : `${API_PREFIX}/assets/`;
+      const key = pathname.slice(prefix.length);
       const assetRes = await serveImageFromR2(env, key);
       if (!assetRes) {
         return applySecurityAndCorsHeaders(
@@ -387,12 +394,12 @@ export async function handleApiRequest(request, env) {
         return applySecurityAndCorsHeaders(response, request, env);
       }
       if (method === 'DELETE') {
-        const auth = await authenticateAdmin(request, env, ROLES_ALL_ADMINS);
+        const auth = await authenticateAdmin(request, env, ROLES_PRIVILEGED_ADMINS);
         if (!auth.authenticated) return applySecurityAndCorsHeaders(auth.response, request, env);
         let key = url.searchParams.get('key') || '';
         if (!key) {
-          const body = await parseJsonBody(request);
-          key = body.key || '';
+          const body = await parseJsonBody(request).catch(() => ({}));
+          key = body.key || body.url || '';
         }
         response = await deletePortfolioImage(request, env, auth.admin, key);
         return applySecurityAndCorsHeaders(response, request, env);
@@ -400,7 +407,7 @@ export async function handleApiRequest(request, env) {
     }
 
     if (pathname.startsWith(`${API_PREFIX}/portfolio/upload/`) && method === 'DELETE') {
-      const auth = await authenticateAdmin(request, env, ROLES_ALL_ADMINS);
+      const auth = await authenticateAdmin(request, env, ROLES_PRIVILEGED_ADMINS);
       if (!auth.authenticated) return applySecurityAndCorsHeaders(auth.response, request, env);
       const key = pathname.slice(`${API_PREFIX}/portfolio/upload/`.length);
       response = await deletePortfolioImage(request, env, auth.admin, key);

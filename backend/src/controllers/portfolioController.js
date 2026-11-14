@@ -64,6 +64,7 @@ export async function listPortfolio(request, env) {
   const url = new URL(request.url);
   const includeDrafts =
     url.searchParams.get('includeDrafts') === 'true' ||
+    url.searchParams.get('includeUnpublished') === 'true' ||
     url.searchParams.get('all') === 'true';
   const category = url.searchParams.get('category');
   const page = Math.max(1, Number.parseInt(url.searchParams.get('page') || '1', 10) || 1);
@@ -220,12 +221,17 @@ export async function createPortfolioProject(request, env, admin) {
   return successResponse({ project: mapPortfolioRow(created) }, 'Portfolio project created.', 201);
 }
 
-export async function updatePortfolioProject(request, env, admin, id) {
-  const existing = await env.DB.prepare('SELECT * FROM portfolio WHERE id = ?').bind(id).first();
+export async function updatePortfolioProject(request, env, admin, slugOrId) {
+  const existing = await env.DB.prepare(
+    'SELECT * FROM portfolio WHERE id = ? OR slug = ? LIMIT 1'
+  )
+    .bind(slugOrId, slugOrId)
+    .first();
   if (!existing) {
     return errorResponse('Portfolio project not found.', 404, 'NOT_FOUND');
   }
 
+  const projectId = existing.id;
   const body = await parseJsonBody(request);
   const current = mapPortfolioRow(existing);
   const merged = {
@@ -299,7 +305,7 @@ export async function updatePortfolioProject(request, env, admin, id) {
   const d = validation.data;
   let slug = body.slug ? slugifyText(body.slug) : existing.slug;
   const slugConflict = await env.DB.prepare('SELECT id FROM portfolio WHERE slug = ? AND id != ?')
-    .bind(slug, id)
+    .bind(slug, projectId)
     .first();
   if (slugConflict) {
     slug = `${slug}-${Math.random().toString(36).slice(2, 6)}`;
@@ -309,7 +315,8 @@ export async function updatePortfolioProject(request, env, admin, id) {
   if (
     existing.thumbnail &&
     existing.thumbnail !== d.thumbnail &&
-    String(existing.thumbnail).startsWith('/api/v1/uploads/')
+    (String(existing.thumbnail).startsWith('/api/v1/uploads/') ||
+      String(existing.thumbnail).startsWith('/api/v1/assets/'))
   ) {
     await deleteImageFromR2(env, existing.thumbnail).catch(() => {});
   }
@@ -347,17 +354,19 @@ export async function updatePortfolioProject(request, env, admin, id) {
       d.isFeatured ? 1 : 0,
       d.displayOrder,
       now,
-      id
+      projectId
     )
     .run();
 
-  const updated = await env.DB.prepare('SELECT * FROM portfolio WHERE id = ?').bind(id).first();
+  const updated = await env.DB.prepare('SELECT * FROM portfolio WHERE id = ?')
+    .bind(projectId)
+    .first();
 
   await logAdminActivity(env, {
     adminId: admin.id,
     action: 'UPDATE_PORTFOLIO_PROJECT',
     entityType: 'Portfolio',
-    entityId: id,
+    entityId: projectId,
     details: `Updated portfolio project "${d.projectTitle}" (Published: ${d.isPublished})`,
     request,
   });
@@ -365,34 +374,47 @@ export async function updatePortfolioProject(request, env, admin, id) {
   return successResponse({ project: mapPortfolioRow(updated) }, 'Portfolio project updated.');
 }
 
-export async function deletePortfolioProject(request, env, admin, id) {
-  const existing = await env.DB.prepare('SELECT * FROM portfolio WHERE id = ?').bind(id).first();
+export async function deletePortfolioProject(request, env, admin, slugOrId) {
+  const existing = await env.DB.prepare(
+    'SELECT * FROM portfolio WHERE id = ? OR slug = ? LIMIT 1'
+  )
+    .bind(slugOrId, slugOrId)
+    .first();
   if (!existing) {
     return errorResponse('Portfolio project not found.', 404, 'NOT_FOUND');
   }
 
-  if (existing.thumbnail && String(existing.thumbnail).startsWith('/api/v1/uploads/')) {
+  const projectId = existing.id;
+
+  if (
+    existing.thumbnail &&
+    (String(existing.thumbnail).startsWith('/api/v1/uploads/') ||
+      String(existing.thumbnail).startsWith('/api/v1/assets/'))
+  ) {
     await deleteImageFromR2(env, existing.thumbnail).catch(() => {});
   }
   const gallery = safeJsonParse(existing.images, []);
   for (const imgUrl of gallery) {
-    if (typeof imgUrl === 'string' && imgUrl.startsWith('/api/v1/uploads/')) {
+    if (
+      typeof imgUrl === 'string' &&
+      (imgUrl.startsWith('/api/v1/uploads/') || imgUrl.startsWith('/api/v1/assets/'))
+    ) {
       await deleteImageFromR2(env, imgUrl).catch(() => {});
     }
   }
 
-  await env.DB.prepare('DELETE FROM portfolio WHERE id = ?').bind(id).run();
+  await env.DB.prepare('DELETE FROM portfolio WHERE id = ?').bind(projectId).run();
 
   await logAdminActivity(env, {
     adminId: admin.id,
     action: 'DELETE_PORTFOLIO_PROJECT',
     entityType: 'Portfolio',
-    entityId: id,
+    entityId: projectId,
     details: `Deleted portfolio project "${existing.project_title}"`,
     request,
   });
 
-  return successResponse({ deletedId: id }, 'Portfolio project deleted.');
+  return successResponse({ deletedId: projectId }, 'Portfolio project deleted.');
 }
 
 export async function uploadPortfolioImage(request, env, admin) {
@@ -416,16 +438,16 @@ export async function deletePortfolioImage(request, env, admin, key) {
     const body = await parseJsonBody(request).catch(() => ({}));
     targetKey = body.key || body.url || '';
   }
-  await deleteImageFromR2(env, targetKey);
+  const deletedKey = await deleteImageFromR2(env, targetKey);
 
   await logAdminActivity(env, {
     adminId: admin.id,
     action: 'DELETE_PORTFOLIO_IMAGE',
     entityType: 'PortfolioAsset',
-    entityId: targetKey,
-    details: `Deleted image ${targetKey} from R2 storage`,
+    entityId: deletedKey,
+    details: `Deleted image ${deletedKey} from R2 storage`,
     request,
   });
 
-  return successResponse({ deletedKey: targetKey }, 'Image removed from R2 storage.');
+  return successResponse({ deletedKey }, 'Image removed from R2 storage.');
 }
