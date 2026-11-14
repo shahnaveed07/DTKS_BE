@@ -3,15 +3,20 @@ info:
   title: DreamTech Kashmir Solutions (DTKS) Backend API
   version: 1.0.0
   description: >
-    Production REST API for DreamTech Kashmir Solutions (https://dreamtechkashmirsolutions.studio/),
+    Standalone production REST API for DreamTech Kashmir Solutions (https://dreamtechkashmirsolutions.studio/),
     powered by Cloudflare Workers, Cloudflare D1 (SQLite), and Cloudflare R2 object storage.
+    Consumed by the separate DTKS frontend repository (https://github.com/shahnaveed07/DTKS.git) via VITE_API_BASE_URL.
+    Features WebCrypto PBKDF2-HMAC-SHA512 ($pbkdf2-sha512$) password hashing with transparent legacy hash migration,
+    distributed D1 sliding-window rate limiting, and granular Role-Based Access Control (super_admin, admin, editor).
   contact:
     name: DreamTech Kashmir Solutions Engineering
     email: dreamtechkashmirsolutions@gmail.com
     url: https://dreamtechkashmirsolutions.studio
 servers:
   - url: https://api.dreamtechkashmirsolutions.studio/api/v1
-    description: Production Cloudflare Workers API
+    description: Production Cloudflare Workers API Subdomain
+  - url: https://dreamtechkashmirsolutions.studio/api/v1
+    description: Production Same-Origin Cloudflare Workers Route
   - url: http://localhost:8787/api/v1
     description: Local Wrangler Development Server
   - url: http://localhost:3000/api/v1
@@ -23,7 +28,7 @@ components:
       type: http
       scheme: bearer
       bearerFormat: JWT
-      description: Short-lived (15m) HMAC-SHA256 JWT access token issued by POST /auth/login or POST /auth/refresh.
+      description: Short-lived (15m) HMAC-SHA256 JWT access token issued by POST /auth/login or POST /auth/refresh. Enforces role-based access control (super_admin, admin, editor).
   schemas:
     StandardSuccessResponse:
       type: object
@@ -614,10 +619,35 @@ paths:
         '200':
           description: Public site settings (sensitive keys stripped)
     put:
-      summary: Update Site Settings (Admin)
+      summary: Update Site Settings (super_admin / admin only)
       tags: [Settings]
       security:
         - BearerAuth: []
       responses:
         '200':
           description: Site settings updated
+        '403':
+          description: Forbidden for editor role
+  /bootstrap:
+    get:
+      summary: Get Combined Public Website Bootstrap Payload (Services, Packages, Portfolio, Settings)
+      tags: [System]
+      responses:
+        '200':
+          description: Combined public catalog and settings payload for the DTKS frontend
+  /admin/activity-logs:
+    get:
+      summary: List Admin Activity & Email Delivery Audit Logs (super_admin / admin only)
+      tags: [Dashboard]
+      security:
+        - BearerAuth: []
+      parameters:
+        - name: limit
+          in: query
+          schema: { type: integer, default: 50 }
+      responses:
+        '200':
+          description: Activity log entries
+        '403':
+          description: Forbidden for editor role
+
