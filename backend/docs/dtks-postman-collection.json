@@ -25,6 +25,16 @@
       "key": "adminPassword",
       "value": "replace-with-your-admin-password",
       "type": "string"
+    },
+    {
+      "key": "clientAccessToken",
+      "value": "",
+      "type": "string"
+    },
+    {
+      "key": "clientRefreshToken",
+      "value": "",
+      "type": "string"
     }
   ],
   "item": [
@@ -84,6 +94,18 @@
             "method": "POST",
             "header": [{ "key": "Authorization", "value": "Bearer {{accessToken}}" }],
             "url": "{{baseUrl}}/auth/logout"
+          }
+        },
+        {
+          "name": "Accept Admin Invite (/auth/accept-invite)",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "url": "{{baseUrl}}/auth/accept-invite",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"token\": \"<raw-invite-token>\",\n  \"password\": \"StrongAdminPass#2026\",\n  \"confirmPassword\": \"StrongAdminPass#2026\"\n}"
+            }
           }
         }
       ]
@@ -325,6 +347,145 @@
           "request": {
             "method": "GET",
             "url": "{{baseUrl}}/settings"
+          }
+        }
+      ]
+    },
+    {
+      "name": "8. Admin Account Management (Super Admin)",
+      "item": [
+        {
+          "name": "List Admin Accounts",
+          "request": {
+            "method": "GET",
+            "header": [{ "key": "Authorization", "value": "Bearer {{accessToken}}" }],
+            "url": "{{baseUrl}}/admin/accounts"
+          }
+        },
+        {
+          "name": "Create Admin Account (Invite)",
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Authorization", "value": "Bearer {{accessToken}}" },
+              { "key": "Content-Type", "value": "application/json" }
+            ],
+            "url": "{{baseUrl}}/admin/accounts",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"name\": \"Operations Admin\",\n  \"email\": \"ops@dreamtechkashmirsolutions.studio\",\n  \"role\": \"admin\"\n}"
+            }
+          }
+        },
+        {
+          "name": "Update Admin Role or Name",
+          "request": {
+            "method": "PATCH",
+            "header": [
+              { "key": "Authorization", "value": "Bearer {{accessToken}}" },
+              { "key": "Content-Type", "value": "application/json" }
+            ],
+            "url": "{{baseUrl}}/admin/accounts/{{adminId}}",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"role\": \"editor\"\n}"
+            }
+          }
+        },
+        {
+          "name": "Update Admin Status (Activate / Deactivate)",
+          "request": {
+            "method": "PATCH",
+            "header": [
+              { "key": "Authorization", "value": "Bearer {{accessToken}}" },
+              { "key": "Content-Type", "value": "application/json" }
+            ],
+            "url": "{{baseUrl}}/admin/accounts/{{adminId}}/status",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"isActive\": false\n}"
+            }
+          }
+        },
+        {
+          "name": "Revoke Admin Sessions",
+          "request": {
+            "method": "DELETE",
+            "header": [{ "key": "Authorization", "value": "Bearer {{accessToken}}" }],
+            "url": "{{baseUrl}}/admin/accounts/{{adminId}}/sessions"
+          }
+        }
+      ]
+    },
+    {
+      "name": "9. Client Authentication & Portal",
+      "item": [
+        {
+          "name": "Client Register",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "url": "{{baseUrl}}/client/auth/register",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"fullName\": \"Amina Jan\",\n  \"email\": \"amina@example.com\",\n  \"phone\": \"+91 99061 55501\",\n  \"city\": \"Srinagar\",\n  \"businessName\": \"Heritage Crafts\",\n  \"password\": \"ClientPass#2026!\",\n  \"confirmPassword\": \"ClientPass#2026!\"\n}"
+            }
+          }
+        },
+        {
+          "name": "Client Verify Email",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "url": "{{baseUrl}}/client/auth/verify-email",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"token\": \"<raw-verification-token>\"\n}"
+            }
+          }
+        },
+        {
+          "name": "Client Login",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "url": "{{baseUrl}}/client/auth/login",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"email\": \"amina@example.com\",\n  \"password\": \"ClientPass#2026!\"\n}"
+            }
+          }
+        },
+        {
+          "name": "Client Me (/client/auth/me)",
+          "request": {
+            "method": "GET",
+            "header": [{ "key": "Authorization", "value": "Bearer {{clientAccessToken}}" }],
+            "url": "{{baseUrl}}/client/auth/me"
+          }
+        },
+        {
+          "name": "Client Orders (/client/orders)",
+          "request": {
+            "method": "GET",
+            "header": [{ "key": "Authorization", "value": "Bearer {{clientAccessToken}}" }],
+            "url": "{{baseUrl}}/client/orders"
+          }
+        },
+        {
+          "name": "Client Quotations (/client/quotations)",
+          "request": {
+            "method": "GET",
+            "header": [{ "key": "Authorization", "value": "Bearer {{clientAccessToken}}" }],
+            "url": "{{baseUrl}}/client/quotations"
+          }
+        },
+        {
+          "name": "Client Projects (/client/projects)",
+          "request": {
+            "method": "GET",
+            "header": [{ "key": "Authorization", "value": "Bearer {{clientAccessToken}}" }],
+            "url": "{{baseUrl}}/client/projects"
           }
         }
       ]

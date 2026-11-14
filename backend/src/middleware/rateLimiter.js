@@ -18,6 +18,31 @@ export const RATE_LIMIT_POLICIES = {
     maxRequests: 10,
     message: 'Too many login attempts. Please wait 15 minutes before trying again.',
   },
+  authRefresh: {
+    windowMs: 15 * 60 * 1000, // 15 minutes
+    maxRequests: 30,
+    message: 'Too many token refresh requests. Please wait a few minutes before trying again.',
+  },
+  clientRegister: {
+    windowMs: 15 * 60 * 1000, // 15 minutes
+    maxRequests: 10,
+    message: 'Too many registration attempts. Please wait 15 minutes before trying again.',
+  },
+  clientVerifyEmail: {
+    windowMs: 15 * 60 * 1000, // 15 minutes
+    maxRequests: 15,
+    message: 'Too many email verification attempts. Please wait 15 minutes before trying again.',
+  },
+  passwordReset: {
+    windowMs: 15 * 60 * 1000, // 15 minutes
+    maxRequests: 8,
+    message: 'Too many password reset requests. Please wait 15 minutes before trying again.',
+  },
+  adminInvite: {
+    windowMs: 15 * 60 * 1000, // 15 minutes
+    maxRequests: 20,
+    message: 'Too many invitation requests. Please wait 15 minutes before trying again.',
+  },
   publicSubmission: {
     windowMs: 10 * 60 * 1000, // 10 minutes
     maxRequests: 25,

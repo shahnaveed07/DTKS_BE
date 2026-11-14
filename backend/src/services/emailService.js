@@ -3,35 +3,73 @@ import { logAdminActivity } from './auditService.js';
 /**
  * Configurable Transactional Email Notification Service (Resend HTTP API)
  *
- * Standardized Secret Name:
+ * Standardized Secret & Config Names:
  *   - `RESEND_API_KEY` (also accepts legacy alias `EMAIL_PROVIDER_API_KEY`)
- *   - `EMAIL_FROM_ADDRESS` (default: `notifications@dreamtechkashmirsolutions.studio`)
+ *   - `EMAIL_FROM_ADDRESS` (also accepts alias `EMAIL_FROM`, default: `notifications@dreamtechkashmirsolutions.studio`)
  *   - `ADMIN_NOTIFICATION_EMAIL` (default: `contact@dreamtechkashmirsolutions.studio`)
+ *   - `APP_URL` / `FRONTEND_URL` (default: `https://dreamtechkashmirsolutions.studio`)
  *
- * Non-Blocking Guarantee:
- *   Core order and contact workflows always succeed even if `RESEND_API_KEY` is unconfigured
- *   or the upstream email API returns an error. All dispatch outcomes are recorded in `activity_logs`.
+ * Delivery Integrity Guarantee:
+ *   - Never reports `sent: true` when `RESEND_API_KEY` is unconfigured or when Resend returns an error.
+ *   - Order & contact notifications remain non-blocking for public forms.
+ *   - Auth-critical flows (client email verification, password reset, admin invitations) inspect
+ *     `{ sent, status }` and keep accounts pending until delivery succeeds.
+ *   - Audit logs record delivery metadata ONLY — never raw tokens, secrets, or passwords.
  */
+
+export function getAppBaseUrl(env = {}) {
+  const raw =
+    env?.APP_URL ||
+    env?.FRONTEND_URL ||
+    (typeof process !== 'undefined' && (process.env?.APP_URL || process.env?.FRONTEND_URL)) ||
+    'https://dreamtechkashmirsolutions.studio';
+  return String(raw).trim().replace(/\/+$/, '');
+}
+
+export function isEmailProviderConfigured(env = {}) {
+  const apiKey = (env?.RESEND_API_KEY || env?.EMAIL_PROVIDER_API_KEY || '').trim();
+  return Boolean(apiKey && !apiKey.startsWith('re_replace_'));
+}
 
 export async function dispatchEmail(
   env,
-  { recipientEmail, recipientType, subject, bodyText, eventType, relatedEntityId }
+  {
+    recipientEmail,
+    recipientType,
+    subject,
+    bodyText,
+    eventType,
+    relatedEntityId,
+    skipExampleDomains = false,
+  }
 ) {
   const apiKey = (env?.RESEND_API_KEY || env?.EMAIL_PROVIDER_API_KEY || '').trim();
-  const fromAddress = env?.EMAIL_FROM_ADDRESS || 'notifications@dreamtechkashmirsolutions.studio';
+  const fromAddress =
+    env?.EMAIL_FROM_ADDRESS ||
+    env?.EMAIL_FROM ||
+    'notifications@dreamtechkashmirsolutions.studio';
+  const fetchImpl = typeof env?.EMAIL_FETCH === 'function' ? env.EMAIL_FETCH : fetch;
 
   let status = 'skipped_unconfigured';
-  let detailMessage = 'RESEND_API_KEY not configured; skipped live dispatch';
+  let detailMessage = 'RESEND_API_KEY not configured; email not dispatched';
+  let messageId = null;
 
-  if (
-    apiKey &&
-    !apiKey.startsWith('re_replace_') &&
+  const isExampleDomain =
     recipientEmail &&
-    !recipientEmail.endsWith('.example') &&
-    !recipientEmail.endsWith('@example.com')
-  ) {
+    (recipientEmail.endsWith('.example') || recipientEmail.endsWith('@example.com'));
+
+  if (!apiKey || apiKey.startsWith('re_replace_')) {
+    status = 'skipped_unconfigured';
+    detailMessage = 'RESEND_API_KEY not configured; email not dispatched';
+  } else if (!recipientEmail) {
+    status = 'failed';
+    detailMessage = 'Missing recipient email address';
+  } else if (skipExampleDomains && isExampleDomain) {
+    status = 'skipped_example_domain';
+    detailMessage = 'Skipped dispatch to reserved example domain';
+  } else {
     try {
-      const response = await fetch('https://api.resend.com/emails', {
+      const response = await fetchImpl('https://api.resend.com/emails', {
         method: 'POST',
         headers: {
           Authorization: `Bearer ${apiKey}`,
@@ -46,6 +84,8 @@ export async function dispatchEmail(
       });
 
       if (response.ok) {
+        const resJson = await response.json().catch(() => null);
+        messageId = resJson?.id || null;
         status = 'sent';
         detailMessage = `Dispatched email to ${recipientEmail}`;
       } else {
@@ -68,18 +108,24 @@ export async function dispatchEmail(
       recipientEmail,
       subject,
       status,
+      ...(messageId ? { messageId } : {}),
       note: detailMessage,
     }),
   });
 
-  return { status, detailMessage };
+  return {
+    sent: status === 'sent',
+    status,
+    detailMessage,
+    messageId,
+  };
 }
 
 export async function notifyOrderCreated(env, order) {
   const adminEmail = env?.ADMIN_NOTIFICATION_EMAIL || 'contact@dreamtechkashmirsolutions.studio';
   const orderNumber = order.orderNumber || order.order_number || order.referenceId;
+  const appUrl = getAppBaseUrl(env);
 
-  // 1. Customer confirmation notification
   await dispatchEmail(env, {
     recipientEmail: order.customerEmail || order.customer_email,
     recipientType: 'customer',
@@ -93,16 +139,16 @@ export async function notifyOrderCreated(env, order) {
       `Selected Package: ${order.packageTitle || 'Custom Website Quote'}`,
       `Current Status: ${order.status}`,
       '',
-      `You can track your project status anytime at https://dreamtechkashmirsolutions.studio/track-order using your Order Number (${orderNumber}) and email address.`,
+      `You can track your project status anytime at ${appUrl}/track-order using your Order Number (${orderNumber}) and email address.`,
       '',
       `Best regards,`,
       `DreamTech Kashmir Solutions (DTKS)`,
     ].join('\n'),
     eventType: 'ORDER_RECEIVED_CUSTOMER',
     relatedEntityId: order.id,
+    skipExampleDomains: true,
   });
 
-  // 2. Admin new order notification
   await dispatchEmail(env, {
     recipientEmail: adminEmail,
     recipientType: 'admin',
@@ -116,6 +162,7 @@ export async function notifyOrderCreated(env, order) {
     ].join('\n'),
     eventType: 'ORDER_RECEIVED_ADMIN',
     relatedEntityId: order.id,
+    skipExampleDomains: true,
   });
 }
 
@@ -123,6 +170,7 @@ export async function notifyOrderStatusUpdated(env, order, previousStatus) {
   const customerEmail = order?.customerEmail || order?.customer_email;
   const orderNumber = order?.orderNumber || order?.order_number || order?.referenceId;
   if (!customerEmail || order.status === previousStatus) return;
+  const appUrl = getAppBaseUrl(env);
 
   await dispatchEmail(env, {
     recipientEmail: customerEmail,
@@ -137,12 +185,13 @@ export async function notifyOrderStatusUpdated(env, order, previousStatus) {
       ...(order.quotationAmount ? [`Quotation Amount: INR ${order.quotationAmount}`] : []),
       ...(order.customerUpdate ? [`Team Update: ${order.customerUpdate}`] : []),
       '',
-      `Track full details at https://dreamtechkashmirsolutions.studio/track-order`,
+      `Track full details at ${appUrl}/track-order`,
       '',
       `DreamTech Kashmir Solutions (DTKS)`,
     ].join('\n'),
     eventType: 'ORDER_STATUS_UPDATED_CUSTOMER',
     relatedEntityId: order.id,
+    skipExampleDomains: true,
   });
 }
 
@@ -162,5 +211,117 @@ export async function notifyContactSubmitted(env, inquiry) {
     ].join('\n'),
     eventType: 'CONTACT_RECEIVED_ADMIN',
     relatedEntityId: inquiry.id,
+    skipExampleDomains: true,
+  });
+}
+
+export async function sendClientVerificationEmail(
+  env,
+  { accountId, email, fullName, verificationToken, expiresHours = 24 }
+) {
+  const appUrl = getAppBaseUrl(env);
+  const verifyUrl = `${appUrl}/verify-email?token=${encodeURIComponent(verificationToken)}`;
+
+  return dispatchEmail(env, {
+    recipientEmail: email,
+    recipientType: 'customer',
+    subject: '[DTKS] Verify your DreamTech Kashmir Solutions client account',
+    bodyText: [
+      `Hello ${fullName},`,
+      '',
+      `Thank you for registering for a DreamTech Kashmir Solutions (DTKS) client account.`,
+      `Please verify your email address using the link below within ${expiresHours} hours to activate your account:`,
+      '',
+      verifyUrl,
+      '',
+      `If you did not create this account, you can safely ignore this email.`,
+      '',
+      `DreamTech Kashmir Solutions (DTKS)`,
+    ].join('\n'),
+    eventType: 'CLIENT_EMAIL_VERIFICATION',
+    relatedEntityId: accountId,
+    skipExampleDomains: false,
+  });
+}
+
+export async function sendClientPasswordResetEmail(
+  env,
+  { accountId, email, fullName, resetToken, expiresMinutes = 60 }
+) {
+  const appUrl = getAppBaseUrl(env);
+  const resetUrl = `${appUrl}/reset-password?token=${encodeURIComponent(resetToken)}`;
+
+  return dispatchEmail(env, {
+    recipientEmail: email,
+    recipientType: 'customer',
+    subject: '[DTKS] Reset your client account password',
+    bodyText: [
+      `Hello ${fullName},`,
+      '',
+      `We received a request to reset the password for your DTKS client account.`,
+      `Use the single-use link below within ${expiresMinutes} minutes to set a new password:`,
+      '',
+      resetUrl,
+      '',
+      `If you did not request a password reset, no action is needed and your current password remains unchanged.`,
+      '',
+      `DreamTech Kashmir Solutions (DTKS)`,
+    ].join('\n'),
+    eventType: 'CLIENT_PASSWORD_RESET',
+    relatedEntityId: accountId,
+    skipExampleDomains: false,
+  });
+}
+
+export async function sendClientSecurityNotificationEmail(
+  env,
+  { accountId, email, fullName, eventTitle, eventDescription }
+) {
+  return dispatchEmail(env, {
+    recipientEmail: email,
+    recipientType: 'customer',
+    subject: `[DTKS Security] ${eventTitle}`,
+    bodyText: [
+      `Hello ${fullName},`,
+      '',
+      eventDescription,
+      '',
+      `Timestamp: ${new Date().toISOString()}`,
+      `If you did not authorize this change, please contact DreamTech Kashmir Solutions immediately.`,
+      '',
+      `DreamTech Kashmir Solutions (DTKS)`,
+    ].join('\n'),
+    eventType: 'CLIENT_SECURITY_ALERT',
+    relatedEntityId: accountId,
+    skipExampleDomains: false,
+  });
+}
+
+export async function sendAdminInvitationEmail(
+  env,
+  { adminId, email, name, role, inviteToken, expiresHours = 48, invitedByName = 'Super Administrator' }
+) {
+  const appUrl = getAppBaseUrl(env);
+  const inviteUrl = `${appUrl}/admin/accept-invite?token=${encodeURIComponent(inviteToken)}`;
+
+  return dispatchEmail(env, {
+    recipientEmail: email,
+    recipientType: 'admin',
+    subject: `[DTKS Admin] You have been invited as ${role} on DreamTech Kashmir Solutions`,
+    bodyText: [
+      `Hello ${name},`,
+      '',
+      `${invitedByName} has invited you to join the DreamTech Kashmir Solutions (DTKS) administration workspace with the role "${role}".`,
+      `Use the single-use invitation link below within ${expiresHours} hours to set your password and activate your account:`,
+      '',
+      inviteUrl,
+      '',
+      `If you were not expecting this invitation, please contact the DTKS principal administrator.`,
+      '',
+      `DreamTech Kashmir Solutions (DTKS)`,
+    ].join('\n'),
+    eventType: 'ADMIN_INVITATION',
+    relatedEntityId: adminId,
+    skipExampleDomains: false,
   });
 }

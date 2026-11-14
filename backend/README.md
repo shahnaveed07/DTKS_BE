@@ -18,46 +18,51 @@ backend/
 │   ├── routes/
 │   │   └── router.js             # REST API router (/api/v1/*) with granular RBAC
 │   ├── controllers/
-│   │   ├── authController.js     # Login, logout, token refresh, profile, password change & hash migration
-│   │   ├── servicesController.js # Services CRUD & public catalog
-│   │   ├── packagesController.js # Packages CRUD, service filtering, add-ons & maintenance
-│   │   ├── portfolioController.js# Portfolio CRUD, pagination, ordering, R2 image uploads
-│   │   ├── ordersController.js   # Customer order creation, tracking, admin status & history
-│   │   ├── contactController.js  # Contact form submission, spam filtering, admin search & notes
-│   │   ├── dashboardController.js# Real-time D1 dashboard stats, recent items & analytics
-│   │   └── settingsController.js # Public & admin site settings (with secret stripping)
+│   │   ├── authController.js          # Admin login, logout, token refresh, profile, password change & hash migration
+│   │   ├── adminAccountsController.js # Super-admin account management, invite creation/acceptance, status & session revocation
+│   │   ├── clientAuthController.js    # Client registration, email verification, customer linking, login, refresh & password reset
+│   │   ├── clientPortalController.js  # Strictly client-scoped orders, quotations & active projects
+│   │   ├── servicesController.js      # Services CRUD & public catalog
+│   │   ├── packagesController.js      # Packages CRUD, service filtering, add-ons & maintenance
+│   │   ├── portfolioController.js     # Portfolio CRUD, pagination, ordering, R2 image uploads
+│   │   ├── ordersController.js        # Customer order creation, tracking, admin status & history
+│   │   ├── contactController.js       # Contact form submission, spam filtering, admin search & notes
+│   │   ├── dashboardController.js     # Real-time D1 dashboard stats, recent items & analytics
+│   │   └── settingsController.js      # Public & admin site settings (with secret stripping)
 │   ├── services/
-│   │   ├── auditService.js       # Admin activity logging (activity_logs table)
-│   │   ├── emailService.js       # Transactional email notifications (RESEND_API_KEY + audit log)
-│   │   └── storageService.js     # Cloudflare R2 object upload, serving & deletion
+│   │   ├── auditService.js            # Admin & client security audit logging (activity_logs table)
+│   │   ├── emailService.js            # Transactional Resend email delivery (verification, password reset, admin invites, alerts)
+│   │   └── storageService.js          # Cloudflare R2 object upload, serving & deletion
 │   ├── middleware/
-│   │   ├── authMiddleware.js     # Strict JWT verification, RBAC (super_admin/admin/editor), CSRF check
-│   │   ├── rateLimiter.js        # Distributed D1 sliding-window rate limiter (+ native binding support)
-│   │   ├── securityHeaders.js    # CORS origin enforcement & HTTP security headers
-│   │   └── errorHandler.js       # Standardized error handling without internal stack leaks
+│   │   ├── authMiddleware.js          # Isolated Admin & Client JWT verification, token_version checks, RBAC & CSRF validation
+│   │   ├── rateLimiter.js             # Distributed D1 sliding-window rate limiter (+ native binding support)
+│   │   ├── securityHeaders.js         # CORS origin enforcement & HTTP security headers
+│   │   └── errorHandler.js            # Standardized error handling without internal stack leaks
 │   ├── database/
-│   │   ├── d1Adapter.js          # Node.js SQLite + filesystem R2 adapter for local dev/testing
-│   │   └── seed.js               # Non-destructive, idempotent catalog & explicit initial admin seeder
+│   │   ├── d1Adapter.js               # Node.js SQLite + filesystem R2 adapter for local dev/testing
+│   │   └── seed.js                    # Non-destructive, idempotent catalog & explicit initial admin seeder
 │   ├── validators/
-│   │   └── schemas.js            # Request payload validation, XSS sanitization & magic-byte checks
+│   │   └── schemas.js                 # Request payload validation, password strength, XSS sanitization & magic-byte checks
 │   ├── utils/
-│   │   ├── crypto.js             # WebCrypto PBKDF2-HMAC-SHA512 ($pbkdf2-sha512$), legacy migration, JWT
-│   │   └── response.js           # Standardized JSON response, XSS sanitizer & body size enforcement
+│   │   ├── crypto.js                  # WebCrypto PBKDF2-HMAC-SHA512 ($pbkdf2-sha512$), legacy migration, JWT
+│   │   └── response.js                # Standardized JSON response, XSS sanitizer & body size enforcement
 │   └── config/
-│       ├── constants.js          # Allowed statuses, roles, MIME types & size limits
-│       └── cors.js               # Allowed origin validation
+│       ├── constants.js               # Allowed statuses, roles, token lifetimes, MIME types & size limits
+│       └── cors.js                    # Allowed origin validation & CORS header builder (including X-CSRF-Token)
 ├── migrations/
-│   ├── 0001_initial_schema.sql   # 13 relational D1 tables, foreign keys, CHECK constraints & indexes
-│   └── 0002_seed_data.sql        # Non-destructive initial site settings migration (INSERT OR IGNORE)
+│   ├── 0001_initial_schema.sql                  # 13 core D1 tables, foreign keys, CHECK constraints & indexes
+│   ├── 0002_seed_data.sql                       # Non-destructive initial site settings migration (INSERT OR IGNORE)
+│   └── 0003_admin_accounts_and_client_auth.sql  # Additive admin invite/revocation columns + 4 client/invite tables
 ├── tests/
-│   └── backend.test.js           # 19 comprehensive security, RBAC, CRUD, R2 & fault-handling test suites
+│   ├── backend.test.js                # 19 core API security, RBAC, CRUD, R2 & fault-handling test suites
+│   └── auth_and_accounts.test.js      # 9 admin account management, client auth, linking & isolation test suites
 ├── docs/
-│   ├── API_DOCUMENTATION.md      # Complete REST API reference & frontend integration guide
-│   ├── openapi.yaml              # OpenAPI 3.0.3 specification
-│   └── dtks-postman-collection.json # Postman Collection v2.1
-├── wrangler.toml                 # Cloudflare Workers, D1, and R2 configuration
-├── .dev.vars.example             # Example environment variables & secrets
-└── package.json                  # Backend scripts & metadata
+│   ├── API_DOCUMENTATION.md           # Complete REST API reference & frontend integration guide
+│   ├── openapi.yaml                   # OpenAPI 3.0.3 specification
+│   └── dtks-postman-collection.json   # Postman Collection v2.1
+├── wrangler.toml                      # Cloudflare Workers, D1, and R2 configuration
+├── .dev.vars.example                  # Example environment variables & secrets
+└── package.json                       # Backend scripts & metadata
 ```
 
 ---
@@ -66,37 +71,48 @@ backend/
 
 1. **No Default or Fallback Administrator Credentials**:
    - An initial administrator is created **only** when the `admins` table is empty **and** both `INITIAL_ADMIN_EMAIL` and `INITIAL_ADMIN_PASSWORD` (minimum 10 characters, non-placeholder) are explicitly provided via environment secrets.
+   - New administrators are onboarded strictly via expiring, single-use, SHA-256-hashed invitations (`POST /api/v1/admin/accounts` -> `POST /api/v1/auth/accept-invite`); public admin registration does not exist.
 2. **WebCrypto PBKDF2-HMAC-SHA512 Password Hashing & Transparent Migration**:
-   - New and updated passwords use canonical PHC format: `$pbkdf2-sha512$v=1$i=100000$<saltHex>$<hashHex>` with constant-time comparison.
-   - Existing legacy `$argon2id$v=19$...` hashes are transparently verified on login and automatically re-hashed to `$pbkdf2-sha512$v=1$i=100000$...` without disrupting existing administrator accounts.
-3. **JWT Authentication & Refresh Session Rotation**:
-   - Short-lived access tokens (`15m`) and rotated refresh tokens (`7d`) signed with HMAC-SHA256 (`JWT_SECRET` must be at least 32 characters in production).
-   - Refresh tokens are stored as SHA-256 hashes in `refresh_sessions`, rotated on every `/api/v1/auth/refresh` call, and immediately revoked on logout or password change.
+   - New and updated admin & client passwords use canonical PHC format: `$pbkdf2-sha512$v=1$i=100000$<saltHex>$<hashHex>` with constant-time comparison.
+   - Existing legacy `$argon2id$v=19$...` hashes are transparently verified on login and automatically re-hashed to `$pbkdf2-sha512$v=1$i=100000$...`.
+3. **Strictly Isolated Admin & Client JWT Authentication + Session Revocation**:
+   - Short-lived access tokens (`15m`) and rotated refresh tokens (`7d`) signed with HMAC-SHA256 (`JWT_SECRET` >= 32 characters in production).
+   - Admin tokens carry `accountType: "admin"` and `tv` (`token_version`); Client tokens carry `accountType: "client"` and `tv`. `authenticateAdmin` and `authenticateClient` strictly reject cross-domain tokens.
+   - Refresh tokens are stored as SHA-256 hashes in `refresh_sessions` / `customer_refresh_sessions`, rotated on every refresh, and immediately invalidated alongside `token_version` bumps on password change, reset, deactivation, or super-admin session revocation.
 4. **Role-Based Access Control (RBAC)**:
-   - `super_admin` & `admin`: Full access to all administrative endpoints, including `DELETE` operations, site settings updates (`PUT /api/v1/settings`), package add-on/maintenance config updates, and audit logs (`GET /api/v1/admin/activity-logs`).
-   - `editor`: Permitted to create and update services, packages, portfolio items, R2 uploads, orders, and contact inquiries, but restricted (`403 Forbidden`) from deleting records or R2 objects, modifying global site settings, or viewing system audit logs.
-5. **Distributed Rate Limiting**:
-   - Backed by the Cloudflare D1 `rate_limits` table across Worker isolates (and optional Cloudflare native `RATE_LIMITER` binding), with automatic fallback for local testing.
+   - `super_admin`: Full workspace access plus creating/inviting admins, changing roles, activating/deactivating admin accounts, and revoking sessions (with last-active-`super_admin` demotion/deactivation protection).
+   - `admin`: Full workspace access (`DELETE`, `PUT /settings`, package configs, activity logs, notifications) plus read-only access to `/api/v1/admin/accounts`. Cannot create admins, alter roles/statuses, or revoke sessions.
+   - `editor`: Create and update services, packages, portfolio items, R2 uploads, orders, and contact inquiries. Restricted (`403 Forbidden`) from deleting records/R2 objects, modifying global settings, viewing audit logs, or accessing `/api/v1/admin/accounts`.
+5. **Safe Client Verification & Guest Customer Linking**:
+   - Public client registration stores credentials in `customer_accounts` (isolated from `customers`), requires email verification via single-use SHA-256-hashed tokens before sign-in, and links to existing `customers` rows + unlinked historical `orders` only after email ownership is verified.
+   - Unauthenticated guest `POST /api/v1/orders` preserves guest submissions while preventing overwrite of `customers` records linked to verified `customer_accounts`.
+6. **Distributed Rate Limiting & CORS/CSRF**:
+   - Backed by the Cloudflare D1 `rate_limits` table across Worker isolates (and optional Cloudflare native `RATE_LIMITER` binding), with dedicated policies for logins, token refreshes, client registration, email verification, password resets, and admin invite acceptance.
+   - CORS explicitly allows `Authorization` and `X-CSRF-Token` headers.
 
 ---
 
 ## 3. Relational Database Schema (Cloudflare D1)
 
-Defined in `migrations/0001_initial_schema.sql` with 13 tables, foreign keys, `CHECK` constraints, and indexes:
+Defined across `migrations/0001_initial_schema.sql` and `migrations/0003_admin_accounts_and_client_auth.sql` with 17 tables, foreign keys, `CHECK` constraints, and indexes:
 
-1. `admins` – Administrator accounts (`id`, `name`, `email`, `password_hash`, `role`, `is_active`, `created_at`, `updated_at`, `last_login_at`)
-2. `refresh_sessions` – Hashed refresh token sessions (`id`, `admin_id`, `refresh_token_hash`, `user_agent`, `ip_address`, `expires_at`, `revoked_at`, `created_at`)
-3. `customers` – Customer records (`id`, `full_name`, `email`, `phone`, `city`, `business_name`, `created_at`, `updated_at`)
-4. `services` – Website services (`id`, `title`, `slug`, `description`, `features`, `image`, `price`, `is_active`, `display_order`, `created_at`, `updated_at`, plus metadata columns)
-5. `packages` – Service pricing packages (`id`, `name`, `description`, `price`, `features`, `service_id`, `is_active`, `display_order`, `created_at`, `updated_at`, plus scope columns)
-6. `portfolio` – Website showcase items (`id`, `project_title`, `slug`, `description`, `category`, `thumbnail`, `images`, `project_url`, `is_published`, `display_order`, `created_at`, `updated_at`)
-7. `orders` – Customer website orders (`id`, `order_number`, `customer_id`, `service_id`, `package_id`, `customer_name`, `customer_email`, `customer_phone`, `project_description`, `budget`, `status`, `admin_notes`, `created_at`, `updated_at`, plus scope & quotation columns)
-8. `order_items` – Order line items (`id`, `order_id`, `item_type`, `title`, `description`, `quantity`, `unit_price`, `currency`, `created_at`)
-9. `order_status_history` – Audit trail of order status transitions (`id`, `order_id`, `previous_status`, `new_status`, `changed_by_admin_id`, `notes`, `created_at`)
-10. `contact_messages` – Customer inquiries (`id`, `name`, `email`, `phone`, `subject`, `message`, `status`, `admin_notes`, `created_at`, `updated_at`)
-11. `site_settings` – Key-value JSON site configuration (`setting_key`, `setting_value`, `updated_at`, `updated_by_admin_id`)
-12. `activity_logs` – Admin audit & email delivery logs (`id`, `admin_id`, `action`, `entity_type`, `entity_id`, `details`, `ip_address`, `timestamp`)
-13. `rate_limits` – Distributed sliding-window rate limit counters (`rate_key`, `window_start`, `request_count`, `expires_at`)
+1. `admins` – Administrator accounts (`id`, `name`, `email`, `password_hash`, `role`, `is_active`, `token_version`, `invited_by_admin_id`, `invite_accepted_at`, `deactivated_at`, `created_at`, `updated_at`, `last_login_at`)
+2. `admin_invitations` – Single-use expiring SHA-256-hashed admin onboarding invitations (`id`, `admin_id`, `email`, `token_hash`, `invited_by_admin_id`, `expires_at`, `used_at`, `revoked_at`, `created_at`)
+3. `refresh_sessions` – Hashed admin refresh token sessions (`id`, `admin_id`, `refresh_token_hash`, `user_agent`, `ip_address`, `expires_at`, `revoked_at`, `created_at`)
+4. `customers` – Customer profile records (`id`, `full_name`, `email`, `phone`, `city`, `business_name`, `created_at`, `updated_at`)
+5. `customer_accounts` – Client authentication accounts (`id`, `customer_id`, `full_name`, `email`, `phone`, `city`, `business_name`, `password_hash`, `is_email_verified`, `email_verified_at`, `is_active`, `deactivated_at`, `token_version`, `last_login_at`, `created_at`, `updated_at`)
+6. `customer_refresh_sessions` – Hashed client refresh token sessions (`id`, `customer_account_id`, `refresh_token_hash`, `user_agent`, `ip_address`, `expires_at`, `revoked_at`, `created_at`)
+7. `customer_auth_tokens` – Single-use expiring SHA-256-hashed verification and password-reset tokens (`id`, `customer_account_id`, `purpose`, `token_hash`, `expires_at`, `used_at`, `revoked_at`, `created_at`)
+8. `services` – Website services (`id`, `title`, `slug`, `description`, `features`, `image`, `price`, `is_active`, `display_order`, `created_at`, `updated_at`, plus metadata columns)
+9. `packages` – Service pricing packages (`id`, `name`, `description`, `price`, `features`, `service_id`, `is_active`, `display_order`, `created_at`, `updated_at`, plus scope columns)
+10. `portfolio` – Website showcase items (`id`, `project_title`, `slug`, `description`, `category`, `thumbnail`, `images`, `project_url`, `is_published`, `display_order`, `created_at`, `updated_at`)
+11. `orders` – Customer website orders (`id`, `order_number`, `customer_id`, `service_id`, `package_id`, `customer_name`, `customer_email`, `customer_phone`, `project_description`, `budget`, `status`, `admin_notes`, `created_at`, `updated_at`, plus scope & quotation columns)
+12. `order_items` – Order line items (`id`, `order_id`, `item_type`, `title`, `description`, `quantity`, `unit_price`, `currency`, `created_at`)
+13. `order_status_history` – Audit trail of order status transitions (`id`, `order_id`, `previous_status`, `new_status`, `changed_by_admin_id`, `notes`, `created_at`)
+14. `contact_messages` – Customer inquiries (`id`, `name`, `email`, `phone`, `subject`, `message`, `status`, `admin_notes`, `created_at`, `updated_at`)
+15. `site_settings` – Key-value JSON site configuration (`setting_key`, `setting_value`, `updated_at`, `updated_by_admin_id`)
+16. `activity_logs` – Admin & client security audit & email delivery logs (`id`, `admin_id`, `action`, `entity_type`, `entity_id`, `details`, `ip_address`, `timestamp`)
+17. `rate_limits` – Distributed sliding-window rate limit counters (`rate_key`, `window_start`, `request_count`, `expires_at`)
 
 ---
 

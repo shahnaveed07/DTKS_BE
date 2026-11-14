@@ -16,7 +16,7 @@ This guide covers deploying the **DreamTech Kashmir Solutions (DTKS)** standalon
 
 ## 2. Apply D1 Database Migrations (Safe & Non-Destructive)
 
-Apply the non-destructive relational schema (`0001_initial_schema.sql` — 13 tables including `rate_limits`) and initial site settings migration (`0002_seed_data.sql`) to the existing `dtks-production-db` (`be0ce24a-0151-412f-b308-1271bb62abba`):
+Apply the additive D1 migrations (`0001_initial_schema.sql`, `0002_seed_data.sql`, and `0003_admin_accounts_and_client_auth.sql` — 17 tables total including `admin_invitations`, `customer_accounts`, `customer_refresh_sessions`, and `customer_auth_tokens`) to the existing `dtks-production-db` (`be0ce24a-0151-412f-b308-1271bb62abba`):
 
 ```bash
 cd backend
@@ -28,7 +28,7 @@ npx wrangler login
 npx wrangler d1 migrations apply dtks-production-db --remote
 ```
 
-> **Safety Guarantee:** Both migrations use `CREATE TABLE IF NOT EXISTS`, `CREATE INDEX IF NOT EXISTS`, and `INSERT OR IGNORE`. Existing production tables, customer orders, inquiries, and administrator accounts are never dropped or overwritten.
+> **Safety Guarantee:** All migrations are strictly additive (`CREATE TABLE IF NOT EXISTS`, `CREATE INDEX IF NOT EXISTS`, `INSERT OR IGNORE`, and additive `ALTER TABLE admins ADD COLUMN ...`). Existing production tables, customer orders, inquiries, and administrator accounts are never dropped or overwritten.
 
 ---
 
@@ -46,9 +46,11 @@ npx wrangler secret put JWT_SECRET
 npx wrangler secret put INITIAL_ADMIN_EMAIL
 npx wrangler secret put INITIAL_ADMIN_PASSWORD
 
-# Optional: Transactional email API key (Resend) for live email delivery
+# Required for live transactional emails (client email verification, password resets, security alerts, and admin invitations)
 npx wrangler secret put RESEND_API_KEY
 ```
+
+> **Important:** Make sure the domain in `EMAIL_FROM_ADDRESS` (`notifications@dreamtechkashmirsolutions.studio`) is verified in your Resend account, and `APP_URL` is configured (`https://dreamtechkashmirsolutions.studio` in `wrangler.toml`) so verification, password reset, and admin invite links resolve to the correct frontend routes (`/verify-email?token=...`, `/reset-password?token=...`, `/admin/accept-invite?token=...`).
 
 ---
 
@@ -88,7 +90,7 @@ Expected `200 OK`:
 ```
 
 ### 5.2 Readiness Check (`GET /api/v1/ready`)
-Verifies D1 database binding, D1 connection, all 13 required schema tables, and R2 storage binding:
+Verifies D1 database binding, D1 connection, all 17 required schema tables, and R2 storage binding:
 ```bash
 curl -i https://dtks-be.snave9401.workers.dev/api/v1/ready
 curl -i https://api.dreamtechkashmirsolutions.studio/api/v1/ready

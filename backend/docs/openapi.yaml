@@ -28,7 +28,12 @@ components:
       type: http
       scheme: bearer
       bearerFormat: JWT
-      description: Short-lived (15m) HMAC-SHA256 JWT access token issued by POST /auth/login or POST /auth/refresh. Enforces role-based access control (super_admin, admin, editor).
+      description: Short-lived (15m) HMAC-SHA256 Admin JWT access token (`accountType: "admin"`) issued by POST /auth/login or POST /auth/refresh. Enforces role-based access control (super_admin, admin, editor).
+    ClientBearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+      description: Short-lived (15m) HMAC-SHA256 Client JWT access token (`accountType: "client"`) issued by POST /client/auth/login or POST /client/auth/refresh. Isolated from Admin endpoints.
   schemas:
     StandardSuccessResponse:
       type: object
@@ -140,6 +145,41 @@ components:
           enum: [New, In Review, Replied, Archived]
         created_at: { type: string, format: date-time }
 
+    AdminAccount:
+      type: object
+      properties:
+        id: { type: string, example: adm-dtks-initial }
+        name: { type: string, example: Principal Super Admin }
+        email: { type: string, format: email }
+        role:
+          type: string
+          enum: [super_admin, admin, editor]
+        isActive: { type: boolean }
+        invitePending: { type: boolean }
+        invitedByAdminId: { type: string, nullable: true }
+        inviteAcceptedAt: { type: string, format: date-time, nullable: true }
+        deactivatedAt: { type: string, format: date-time, nullable: true }
+        lastLoginAt: { type: string, format: date-time, nullable: true }
+        createdAt: { type: string, format: date-time }
+        updatedAt: { type: string, format: date-time }
+    ClientAccount:
+      type: object
+      properties:
+        id: { type: string, example: cacc_123 }
+        customerId: { type: string, nullable: true }
+        fullName: { type: string }
+        email: { type: string, format: email }
+        phone: { type: string }
+        city: { type: string }
+        businessName: { type: string }
+        isEmailVerified: { type: boolean }
+        emailVerifiedAt: { type: string, format: date-time, nullable: true }
+        isActive: { type: boolean }
+        deactivatedAt: { type: string, format: date-time, nullable: true }
+        lastLoginAt: { type: string, format: date-time, nullable: true }
+        createdAt: { type: string, format: date-time }
+        updatedAt: { type: string, format: date-time }
+
 paths:
   /health:
     get:
@@ -150,7 +190,7 @@ paths:
           description: Worker is running and operational
   /ready:
     get:
-      summary: Infrastructure Readiness Check (Verifies D1 Connection, 13 Schema Tables & R2 Storage)
+      summary: Infrastructure Readiness Check (Verifies D1 Connection, 17 Schema Tables & R2 Storage)
       tags: [System]
       responses:
         '200':
@@ -210,6 +250,26 @@ paths:
           description: Current admin profile
         '401':
           description: Unauthorized
+  /auth/profile:
+    patch:
+      summary: Update Current Admin Name
+      tags: [Authentication]
+      security:
+        - BearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [name]
+              properties:
+                name: { type: string, minLength: 2 }
+      responses:
+        '200':
+          description: Profile updated
+        '400':
+          description: Validation error or forbidden field modification attempted
   /auth/change-password:
     post:
       summary: Change Admin Password
@@ -226,9 +286,436 @@ paths:
               properties:
                 currentPassword: { type: string }
                 newPassword: { type: string, minLength: 8 }
+                confirmPassword: { type: string, minLength: 8 }
       responses:
         '200':
-          description: Password updated and refresh sessions rotated
+          description: Password updated and refresh sessions revoked
+  /auth/accept-invite:
+    post:
+      summary: Accept Admin Invitation & Set Password (Public)
+      tags: [Authentication]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [token, password, confirmPassword]
+              properties:
+                token: { type: string }
+                password: { type: string, minLength: 8 }
+                confirmPassword: { type: string, minLength: 8 }
+      responses:
+        '200':
+          description: Admin account activated
+        '400':
+          description: Invalid, expired, or already-used token or weak password
+  /admin/accounts:
+    get:
+      summary: List Admin Accounts (super_admin, admin)
+      tags: [Admin Accounts]
+      security:
+        - BearerAuth: []
+      parameters:
+        - name: role
+          in: query
+          schema: { type: string, enum: [super_admin, admin, editor, all] }
+        - name: isActive
+          in: query
+          schema: { type: boolean }
+        - name: search
+          in: query
+          schema: { type: string }
+      responses:
+        '200':
+          description: Admin accounts list
+        '403':
+          description: Forbidden for editor role
+    post:
+      summary: Create Pending Admin Account & Send Invitation Email (super_admin only)
+      tags: [Admin Accounts]
+      security:
+        - BearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [name, email, role]
+              properties:
+                name: { type: string }
+                email: { type: string, format: email }
+                role: { type: string, enum: [super_admin, admin, editor] }
+      responses:
+        '201':
+          description: Pending admin created and invite email sent
+        '403':
+          description: Forbidden (super_admin only)
+        '409':
+          description: Admin email already exists
+        '503':
+          description: Account created in pending state but email provider unavailable/failed
+  /admin/accounts/{id}:
+    get:
+      summary: Inspect Admin Account, Sessions & Latest Invite (super_admin, admin)
+      tags: [Admin Accounts]
+      security:
+        - BearerAuth: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: { type: string }
+      responses:
+        '200':
+          description: Admin account details
+        '404':
+          description: Not found
+    patch:
+      summary: Update Admin Name or Role (super_admin only)
+      tags: [Admin Accounts]
+      security:
+        - BearerAuth: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: { type: string }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                name: { type: string }
+                role: { type: string, enum: [super_admin, admin, editor] }
+      responses:
+        '200':
+          description: Admin account updated
+        '409':
+          description: Cannot demote last active super_admin
+  /admin/accounts/{id}/resend-invite:
+    post:
+      summary: Resend Invitation Email for Pending Admin (super_admin only)
+      tags: [Admin Accounts]
+      security:
+        - BearerAuth: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: { type: string }
+      responses:
+        '200':
+          description: Invitation email resent
+        '503':
+          description: Email provider unavailable/failed
+  /admin/accounts/{id}/status:
+    patch:
+      summary: Activate or Deactivate Admin Account (super_admin only)
+      tags: [Admin Accounts]
+      security:
+        - BearerAuth: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: { type: string }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [isActive]
+              properties:
+                isActive: { type: boolean }
+      responses:
+        '200':
+          description: Admin status updated
+        '409':
+          description: Cannot deactivate last active super_admin
+  /admin/accounts/{id}/sessions:
+    delete:
+      summary: Revoke All Active Sessions for Admin Account (super_admin only)
+      tags: [Admin Accounts]
+      security:
+        - BearerAuth: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: { type: string }
+      responses:
+        '200':
+          description: Sessions revoked and token_version incremented
+  /client/auth/register:
+    post:
+      summary: Register Public Client Account (Requires Email Verification)
+      tags: [Client Authentication]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [fullName, email, phone, password, confirmPassword]
+              properties:
+                fullName: { type: string }
+                email: { type: string, format: email }
+                phone: { type: string }
+                city: { type: string }
+                businessName: { type: string }
+                password: { type: string, minLength: 8 }
+                confirmPassword: { type: string, minLength: 8 }
+      responses:
+        '201':
+          description: Client registered and verification email dispatched
+        '409':
+          description: Registration conflict
+        '503':
+          description: Email provider unavailable or failed
+  /client/auth/resend-verification:
+    post:
+      summary: Resend Client Verification Email
+      tags: [Client Authentication]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [email]
+              properties:
+                email: { type: string, format: email }
+      responses:
+        '200':
+          description: Uniform confirmation returned when provider is configured
+        '503':
+          description: Email provider unconfigured
+  /client/auth/verify-email:
+    post:
+      summary: Verify Client Email & Safely Link Existing Customer Record
+      tags: [Client Authentication]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [token]
+              properties:
+                token: { type: string }
+      responses:
+        '200':
+          description: Email verified and customer record linked
+        '400':
+          description: Invalid, expired, or already-used verification token
+  /client/auth/login:
+    post:
+      summary: Client Login (Verified, Active Clients Only)
+      tags: [Client Authentication]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [email, password]
+              properties:
+                email: { type: string, format: email }
+                password: { type: string }
+      responses:
+        '200':
+          description: Authenticated successfully
+        '401':
+          description: Invalid credentials
+        '403':
+          description: Email not verified or account deactivated
+  /client/auth/refresh:
+    post:
+      summary: Rotate Client Refresh Token
+      tags: [Client Authentication]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [refreshToken]
+              properties:
+                refreshToken: { type: string }
+      responses:
+        '200':
+          description: New client token pair issued
+        '401':
+          description: Invalid or expired refresh token
+  /client/auth/logout:
+    post:
+      summary: Client Logout & Session Revocation
+      tags: [Client Authentication]
+      responses:
+        '200':
+          description: Logged out and session revoked
+  /client/auth/me:
+    get:
+      summary: Get Current Authenticated Client Profile
+      tags: [Client Authentication]
+      security:
+        - ClientBearerAuth: []
+      responses:
+        '200':
+          description: Current client profile
+        '401':
+          description: Unauthorized or non-client token
+  /client/auth/profile:
+    patch:
+      summary: Update Current Client Profile
+      tags: [Client Authentication]
+      security:
+        - ClientBearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                fullName: { type: string }
+                phone: { type: string }
+                city: { type: string }
+                businessName: { type: string }
+      responses:
+        '200':
+          description: Profile updated
+  /client/auth/change-password:
+    post:
+      summary: Change Client Password
+      tags: [Client Authentication]
+      security:
+        - ClientBearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [currentPassword, newPassword]
+              properties:
+                currentPassword: { type: string }
+                newPassword: { type: string, minLength: 8 }
+                confirmPassword: { type: string, minLength: 8 }
+      responses:
+        '200':
+          description: Password updated and active sessions revoked
+  /client/auth/forgot-password:
+    post:
+      summary: Request Client Password Reset Email
+      tags: [Client Authentication]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [email]
+              properties:
+                email: { type: string, format: email }
+      responses:
+        '200':
+          description: Uniform confirmation returned when provider is configured
+        '503':
+          description: Email provider unconfigured
+  /client/auth/reset-password:
+    post:
+      summary: Reset Client Password with Single-Use Token
+      tags: [Client Authentication]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [token, password, confirmPassword]
+              properties:
+                token: { type: string }
+                password: { type: string, minLength: 8 }
+                confirmPassword: { type: string, minLength: 8 }
+      responses:
+        '200':
+          description: Password reset and existing sessions revoked
+        '400':
+          description: Invalid, expired, or used token or weak password
+  /client/auth/deactivate:
+    post:
+      summary: Deactivate Current Client Account
+      tags: [Client Authentication]
+      security:
+        - ClientBearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [password]
+              properties:
+                password: { type: string }
+      responses:
+        '200':
+          description: Client account deactivated and all sessions revoked
+  /client/orders:
+    get:
+      summary: List Authenticated Client Orders (Scoped to Client Customer ID)
+      tags: [Client Portal]
+      security:
+        - ClientBearerAuth: []
+      parameters:
+        - name: status
+          in: query
+          schema: { type: string }
+        - name: search
+          in: query
+          schema: { type: string }
+      responses:
+        '200':
+          description: Client orders without internal admin_notes
+  /client/orders/{id}:
+    get:
+      summary: Get Single Client Order Details & Status History
+      tags: [Client Portal]
+      security:
+        - ClientBearerAuth: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: { type: string }
+      responses:
+        '200':
+          description: Client order details without internal admin_notes
+        '404':
+          description: Order not found or owned by another customer
+  /client/quotations:
+    get:
+      summary: List Client Quotations
+      tags: [Client Portal]
+      security:
+        - ClientBearerAuth: []
+      responses:
+        '200':
+          description: Client quotations
+  /client/projects:
+    get:
+      summary: List Client Active & Completed Projects
+      tags: [Client Portal]
+      security:
+        - ClientBearerAuth: []
+      responses:
+        '200':
+          description: Client projects
   /services:
     get:
       summary: List Active Services (Public) or All Services (Admin)

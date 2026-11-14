@@ -2,7 +2,7 @@ import { API_PREFIX } from '../config/constants.js';
 import { isOriginAllowed } from '../config/cors.js';
 import { applySecurityAndCorsHeaders } from '../middleware/securityHeaders.js';
 import { checkRateLimit } from '../middleware/rateLimiter.js';
-import { authenticateAdmin } from '../middleware/authMiddleware.js';
+import { authenticateAdmin, authenticateClient } from '../middleware/authMiddleware.js';
 import { handleException, logServerError } from '../middleware/errorHandler.js';
 import { jsonResponse, successResponse, errorResponse, parseJsonBody } from '../utils/response.js';
 import { ensureDatabaseSeeded, verifyDatabaseSchema } from '../database/seed.js';
@@ -16,6 +16,36 @@ import {
   changeAdminPassword,
   updateAdminProfile,
 } from '../controllers/authController.js';
+import {
+  listAdminAccounts,
+  getAdminAccountById,
+  createAdminAccount,
+  resendAdminInvitation,
+  acceptAdminInvite,
+  updateAdminAccount,
+  updateAdminAccountStatus,
+  revokeAdminAccountSessions,
+} from '../controllers/adminAccountsController.js';
+import {
+  registerClient,
+  resendClientVerification,
+  verifyClientEmail,
+  loginClient,
+  refreshClientToken,
+  logoutClient,
+  getAuthenticatedClient,
+  updateClientProfile,
+  changeClientPassword,
+  forgotClientPassword,
+  resetClientPassword,
+  deactivateClientAccount,
+} from '../controllers/clientAuthController.js';
+import {
+  listClientOrders,
+  getClientOrderById,
+  listClientQuotations,
+  listClientProjects,
+} from '../controllers/clientPortalController.js';
 import {
   listServices,
   getServiceBySlugOrId,
@@ -83,6 +113,7 @@ import {
 
 const ROLES_ALL_ADMINS = ['super_admin', 'admin', 'editor'];
 const ROLES_PRIVILEGED_ADMINS = ['super_admin', 'admin'];
+const ROLES_SUPER_ADMIN_ONLY = ['super_admin'];
 
 function matchPath(pattern, pathname) {
   const patternParts = pattern.split('/').filter(Boolean);
@@ -266,7 +297,20 @@ export async function handleApiRequest(request, env) {
     }
 
     if (pathname === `${API_PREFIX}/auth/refresh` && method === 'POST') {
+      const refreshRate = await checkRateLimit(request, 'authRefresh', env);
+      if (!refreshRate.allowed) {
+        return applySecurityAndCorsHeaders(refreshRate.response, request, env);
+      }
       response = await refreshAdminToken(request, env);
+      return applySecurityAndCorsHeaders(response, request, env);
+    }
+
+    if (pathname === `${API_PREFIX}/auth/accept-invite` && method === 'POST') {
+      const inviteRate = await checkRateLimit(request, 'adminInvite', env);
+      if (!inviteRate.allowed) {
+        return applySecurityAndCorsHeaders(inviteRate.response, request, env);
+      }
+      response = await acceptAdminInvite(request, env);
       return applySecurityAndCorsHeaders(response, request, env);
     }
 
@@ -294,6 +338,196 @@ export async function handleApiRequest(request, env) {
       const auth = await authenticateAdmin(request, env, ROLES_ALL_ADMINS);
       if (!auth.authenticated) return applySecurityAndCorsHeaders(auth.response, request, env);
       response = await changeAdminPassword(request, env, auth.admin);
+      return applySecurityAndCorsHeaders(response, request, env);
+    }
+
+    // ========================================================================
+    // 1B. ADMIN ACCOUNT MANAGEMENT ROUTES (/api/v1/admin/accounts/*)
+    // ========================================================================
+    if (pathname === `${API_PREFIX}/admin/accounts`) {
+      if (method === 'GET') {
+        const auth = await authenticateAdmin(request, env, ROLES_PRIVILEGED_ADMINS);
+        if (!auth.authenticated) return applySecurityAndCorsHeaders(auth.response, request, env);
+        response = await listAdminAccounts(request, env);
+        return applySecurityAndCorsHeaders(response, request, env);
+      }
+      if (method === 'POST') {
+        const auth = await authenticateAdmin(request, env, ROLES_SUPER_ADMIN_ONLY);
+        if (!auth.authenticated) return applySecurityAndCorsHeaders(auth.response, request, env);
+        response = await createAdminAccount(request, env, auth.admin);
+        return applySecurityAndCorsHeaders(response, request, env);
+      }
+    }
+
+    const adminResendInviteMatch = matchPath(`${API_PREFIX}/admin/accounts/:id/resend-invite`, pathname);
+    if (adminResendInviteMatch && method === 'POST') {
+      const auth = await authenticateAdmin(request, env, ROLES_SUPER_ADMIN_ONLY);
+      if (!auth.authenticated) return applySecurityAndCorsHeaders(auth.response, request, env);
+      response = await resendAdminInvitation(request, env, auth.admin, adminResendInviteMatch.id);
+      return applySecurityAndCorsHeaders(response, request, env);
+    }
+
+    const adminAccountStatusMatch = matchPath(`${API_PREFIX}/admin/accounts/:id/status`, pathname);
+    if (adminAccountStatusMatch && (method === 'PATCH' || method === 'PUT')) {
+      const auth = await authenticateAdmin(request, env, ROLES_SUPER_ADMIN_ONLY);
+      if (!auth.authenticated) return applySecurityAndCorsHeaders(auth.response, request, env);
+      response = await updateAdminAccountStatus(request, env, auth.admin, adminAccountStatusMatch.id);
+      return applySecurityAndCorsHeaders(response, request, env);
+    }
+
+    const adminAccountSessionsMatch = matchPath(`${API_PREFIX}/admin/accounts/:id/sessions`, pathname);
+    if (adminAccountSessionsMatch && method === 'DELETE') {
+      const auth = await authenticateAdmin(request, env, ROLES_SUPER_ADMIN_ONLY);
+      if (!auth.authenticated) return applySecurityAndCorsHeaders(auth.response, request, env);
+      response = await revokeAdminAccountSessions(request, env, auth.admin, adminAccountSessionsMatch.id);
+      return applySecurityAndCorsHeaders(response, request, env);
+    }
+
+    const adminAccountMatch = matchPath(`${API_PREFIX}/admin/accounts/:id`, pathname);
+    if (adminAccountMatch) {
+      if (method === 'GET') {
+        const auth = await authenticateAdmin(request, env, ROLES_PRIVILEGED_ADMINS);
+        if (!auth.authenticated) return applySecurityAndCorsHeaders(auth.response, request, env);
+        response = await getAdminAccountById(request, env, adminAccountMatch.id);
+        return applySecurityAndCorsHeaders(response, request, env);
+      }
+      if (method === 'PATCH' || method === 'PUT') {
+        const auth = await authenticateAdmin(request, env, ROLES_SUPER_ADMIN_ONLY);
+        if (!auth.authenticated) return applySecurityAndCorsHeaders(auth.response, request, env);
+        response = await updateAdminAccount(request, env, auth.admin, adminAccountMatch.id);
+        return applySecurityAndCorsHeaders(response, request, env);
+      }
+    }
+
+    // ========================================================================
+    // 1C. CLIENT AUTHENTICATION ROUTES (/api/v1/client/auth/*)
+    // ========================================================================
+    if (pathname === `${API_PREFIX}/client/auth/register` && method === 'POST') {
+      const regRate = await checkRateLimit(request, 'clientRegister', env);
+      if (!regRate.allowed) {
+        return applySecurityAndCorsHeaders(regRate.response, request, env);
+      }
+      response = await registerClient(request, env);
+      return applySecurityAndCorsHeaders(response, request, env);
+    }
+
+    if (pathname === `${API_PREFIX}/client/auth/resend-verification` && method === 'POST') {
+      const verifyRate = await checkRateLimit(request, 'clientVerifyEmail', env);
+      if (!verifyRate.allowed) {
+        return applySecurityAndCorsHeaders(verifyRate.response, request, env);
+      }
+      response = await resendClientVerification(request, env);
+      return applySecurityAndCorsHeaders(response, request, env);
+    }
+
+    if (pathname === `${API_PREFIX}/client/auth/verify-email` && method === 'POST') {
+      const verifyRate = await checkRateLimit(request, 'clientVerifyEmail', env);
+      if (!verifyRate.allowed) {
+        return applySecurityAndCorsHeaders(verifyRate.response, request, env);
+      }
+      response = await verifyClientEmail(request, env);
+      return applySecurityAndCorsHeaders(response, request, env);
+    }
+
+    if (pathname === `${API_PREFIX}/client/auth/login` && method === 'POST') {
+      const loginRate = await checkRateLimit(request, 'authLogin', env);
+      if (!loginRate.allowed) {
+        return applySecurityAndCorsHeaders(loginRate.response, request, env);
+      }
+      response = await loginClient(request, env);
+      return applySecurityAndCorsHeaders(response, request, env);
+    }
+
+    if (pathname === `${API_PREFIX}/client/auth/refresh` && method === 'POST') {
+      const refreshRate = await checkRateLimit(request, 'authRefresh', env);
+      if (!refreshRate.allowed) {
+        return applySecurityAndCorsHeaders(refreshRate.response, request, env);
+      }
+      response = await refreshClientToken(request, env);
+      return applySecurityAndCorsHeaders(response, request, env);
+    }
+
+    if (pathname === `${API_PREFIX}/client/auth/logout` && method === 'POST') {
+      const auth = await authenticateClient(request, env);
+      response = await logoutClient(request, env, auth.authenticated ? auth.client : null);
+      return applySecurityAndCorsHeaders(response, request, env);
+    }
+
+    if (pathname === `${API_PREFIX}/client/auth/me` && method === 'GET') {
+      const auth = await authenticateClient(request, env);
+      if (!auth.authenticated) return applySecurityAndCorsHeaders(auth.response, request, env);
+      response = await getAuthenticatedClient(request, env, auth.client);
+      return applySecurityAndCorsHeaders(response, request, env);
+    }
+
+    if (pathname === `${API_PREFIX}/client/auth/profile` && (method === 'PATCH' || method === 'PUT')) {
+      const auth = await authenticateClient(request, env);
+      if (!auth.authenticated) return applySecurityAndCorsHeaders(auth.response, request, env);
+      response = await updateClientProfile(request, env, auth.client);
+      return applySecurityAndCorsHeaders(response, request, env);
+    }
+
+    if (pathname === `${API_PREFIX}/client/auth/change-password` && method === 'POST') {
+      const auth = await authenticateClient(request, env);
+      if (!auth.authenticated) return applySecurityAndCorsHeaders(auth.response, request, env);
+      response = await changeClientPassword(request, env, auth.client);
+      return applySecurityAndCorsHeaders(response, request, env);
+    }
+
+    if (pathname === `${API_PREFIX}/client/auth/forgot-password` && method === 'POST') {
+      const resetRate = await checkRateLimit(request, 'passwordReset', env);
+      if (!resetRate.allowed) {
+        return applySecurityAndCorsHeaders(resetRate.response, request, env);
+      }
+      response = await forgotClientPassword(request, env);
+      return applySecurityAndCorsHeaders(response, request, env);
+    }
+
+    if (pathname === `${API_PREFIX}/client/auth/reset-password` && method === 'POST') {
+      const resetRate = await checkRateLimit(request, 'passwordReset', env);
+      if (!resetRate.allowed) {
+        return applySecurityAndCorsHeaders(resetRate.response, request, env);
+      }
+      response = await resetClientPassword(request, env);
+      return applySecurityAndCorsHeaders(response, request, env);
+    }
+
+    if (pathname === `${API_PREFIX}/client/auth/deactivate` && method === 'POST') {
+      const auth = await authenticateClient(request, env);
+      if (!auth.authenticated) return applySecurityAndCorsHeaders(auth.response, request, env);
+      response = await deactivateClientAccount(request, env, auth.client);
+      return applySecurityAndCorsHeaders(response, request, env);
+    }
+
+    // ========================================================================
+    // 1D. CLIENT-ONLY DATA ACCESS ROUTES (/api/v1/client/*)
+    // ========================================================================
+    if (pathname === `${API_PREFIX}/client/orders` && method === 'GET') {
+      const auth = await authenticateClient(request, env);
+      if (!auth.authenticated) return applySecurityAndCorsHeaders(auth.response, request, env);
+      response = await listClientOrders(request, env, auth.client);
+      return applySecurityAndCorsHeaders(response, request, env);
+    }
+
+    const clientOrderMatch = matchPath(`${API_PREFIX}/client/orders/:id`, pathname);
+    if (clientOrderMatch && method === 'GET') {
+      const auth = await authenticateClient(request, env);
+      if (!auth.authenticated) return applySecurityAndCorsHeaders(auth.response, request, env);
+      response = await getClientOrderById(request, env, auth.client, clientOrderMatch.id);
+      return applySecurityAndCorsHeaders(response, request, env);
+    }
+
+    if (pathname === `${API_PREFIX}/client/quotations` && method === 'GET') {
+      const auth = await authenticateClient(request, env);
+      if (!auth.authenticated) return applySecurityAndCorsHeaders(auth.response, request, env);
+      response = await listClientQuotations(request, env, auth.client);
+      return applySecurityAndCorsHeaders(response, request, env);
+    }
+
+    if (pathname === `${API_PREFIX}/client/projects` && method === 'GET') {
+      const auth = await authenticateClient(request, env);
+      if (!auth.authenticated) return applySecurityAndCorsHeaders(auth.response, request, env);
+      response = await listClientProjects(request, env, auth.client);
       return applySecurityAndCorsHeaders(response, request, env);
     }
 

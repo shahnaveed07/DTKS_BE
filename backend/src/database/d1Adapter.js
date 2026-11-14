@@ -68,7 +68,28 @@ export class LocalD1Database {
     for (const file of migrationFiles) {
       if (fs.existsSync(file)) {
         const sql = fs.readFileSync(file, 'utf8');
-        this.sqlite.exec(sql);
+        try {
+          this.sqlite.exec(sql);
+        } catch (err) {
+          // Handle re-opening an existing local SQLite DB that already ran additive ALTER TABLE migrations
+          if (/duplicate column name/i.test(String(err?.message || ''))) {
+            const statements = sql
+              .split(';')
+              .map((s) => s.trim())
+              .filter(Boolean);
+            for (const stmt of statements) {
+              try {
+                this.sqlite.exec(`${stmt};`);
+              } catch (stmtErr) {
+                if (!/duplicate column name/i.test(String(stmtErr?.message || ''))) {
+                  throw stmtErr;
+                }
+              }
+            }
+          } else {
+            throw err;
+          }
+        }
       }
     }
   }
@@ -191,6 +212,7 @@ export function createNodeWorkerEnv({
   const migrationFiles = [
     path.join(migrationsDir, '0001_initial_schema.sql'),
     path.join(migrationsDir, '0002_seed_data.sql'),
+    path.join(migrationsDir, '0003_admin_accounts_and_client_auth.sql'),
   ];
 
   const db = new LocalD1Database(dbPath, migrationFiles);
@@ -200,11 +222,17 @@ export function createNodeWorkerEnv({
     DB: db,
     ASSETS_BUCKET: bucket,
     ENVIRONMENT: process.env.ENVIRONMENT || process.env.NODE_ENV || 'development',
+    APP_URL:
+      process.env.APP_URL ||
+      process.env.FRONTEND_URL ||
+      'https://dreamtechkashmirsolutions.studio',
     JWT_SECRET:
       process.env.JWT_SECRET ||
       'dtks-local-dev-only-ephemeral-hmac-secret-key-2026',
-    JWT_ACCESS_EXPIRES_IN: process.env.JWT_ACCESS_EXPIRES_IN || '900',
-    JWT_REFRESH_EXPIRES_IN: process.env.JWT_REFRESH_EXPIRES_IN || '604800',
+    JWT_ACCESS_EXPIRES_IN:
+      process.env.JWT_ACCESS_EXPIRES_IN || process.env.JWT_ACCESS_EXPIRY_SECONDS || '900',
+    JWT_REFRESH_EXPIRES_IN:
+      process.env.JWT_REFRESH_EXPIRES_IN || process.env.JWT_REFRESH_EXPIRY_SECONDS || '604800',
     INITIAL_ADMIN_NAME:
       process.env.INITIAL_ADMIN_NAME ||
       process.env.ADMIN_INITIAL_NAME ||
@@ -219,7 +247,9 @@ export function createNodeWorkerEnv({
     RESEND_API_KEY:
       process.env.RESEND_API_KEY || process.env.EMAIL_PROVIDER_API_KEY || '',
     EMAIL_FROM_ADDRESS:
-      process.env.EMAIL_FROM_ADDRESS || 'notifications@dreamtechkashmirsolutions.studio',
+      process.env.EMAIL_FROM_ADDRESS ||
+      process.env.EMAIL_FROM ||
+      'notifications@dreamtechkashmirsolutions.studio',
     ADMIN_NOTIFICATION_EMAIL:
       process.env.ADMIN_NOTIFICATION_EMAIL || 'contact@dreamtechkashmirsolutions.studio',
     ...overrides,

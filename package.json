@@ -8,7 +8,7 @@
     "dev": "tsx server.ts",
     "build": "tsc --noEmit",
     "start": "node --import tsx server.ts",
-    "test": "node --test backend/tests/backend.test.js",
+    "test": "node --test backend/tests/backend.test.js backend/tests/auth_and_accounts.test.js",
     "db:migrate:local": "cd backend && npx wrangler d1 migrations apply dtks-production-db --local",
     "db:migrate:prod": "cd backend && npx wrangler d1 migrations apply dtks-production-db --remote",
     "deploy": "cd backend && npx wrangler deploy --env production",

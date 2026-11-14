@@ -35,7 +35,10 @@ export function buildCorsHeaders(request, env = {}) {
   const origin = request.headers.get('Origin');
   const headers = {
     'Access-Control-Allow-Methods': 'GET, POST, PUT, PATCH, DELETE, OPTIONS',
-    'Access-Control-Allow-Headers': 'Content-Type, Authorization, X-Requested-With, Accept',
+    'Access-Control-Allow-Headers':
+      'Content-Type, Authorization, X-CSRF-Token, X-Requested-With, Accept',
+    'Access-Control-Expose-Headers':
+      'X-Request-Id, X-RateLimit-Limit, X-RateLimit-Remaining, Retry-After',
     'Access-Control-Max-Age': '86400',
     Vary: 'Origin',
   };

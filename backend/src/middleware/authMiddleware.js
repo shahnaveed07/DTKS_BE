@@ -33,23 +33,38 @@ export function getJwtSecret(env = {}) {
   return configured || 'dtks-local-dev-only-ephemeral-hmac-secret-key-2026';
 }
 
-function parseCookies(cookieHeader = '') {
+export function parseCookies(cookieHeader = '') {
   const out = {};
   for (const pair of String(cookieHeader).split(';')) {
     const idx = pair.indexOf('=');
     if (idx > 0) {
       const k = pair.slice(0, idx).trim();
       const v = pair.slice(idx + 1).trim();
-      out[k] = decodeURIComponent(v);
+      try {
+        out[k] = decodeURIComponent(v);
+      } catch {
+        out[k] = v;
+      }
     }
   }
   return out;
 }
 
+function validateCookieCsrf(request, cookies, csrfCookieName) {
+  const method = (request.method || 'GET').toUpperCase();
+  if (['GET', 'HEAD', 'OPTIONS'].includes(method)) {
+    return true;
+  }
+  const csrfHeader = request.headers.get('X-CSRF-Token') || '';
+  const csrfCookie = cookies[csrfCookieName] || '';
+  return Boolean(csrfHeader && csrfCookie && csrfHeader === csrfCookie);
+}
+
 /**
- * Extracts and verifies the JWT token (via Authorization Bearer header or HttpOnly cookie
- * with CSRF token verification for state-changing requests), then verifies the Admin
- * account is active in D1 (`admins` table) and satisfies role-based access control.
+ * Extracts and verifies the Admin JWT token (via Authorization Bearer header or HttpOnly cookie
+ * with CSRF token verification for state-changing requests), verifies `accountType !== 'client'`,
+ * validates `token_version` for immediate session revocation, checks `admins.is_active`, and
+ * enforces role-based access control.
  */
 export async function authenticateAdmin(
   request,
@@ -57,17 +72,15 @@ export async function authenticateAdmin(
   allowedRoles = ['super_admin', 'admin', 'editor']
 ) {
   const authHeader = request.headers.get('Authorization') || '';
+  const cookies = parseCookies(request.headers.get('Cookie') || '');
   let token = '';
   let usedCookieAuth = false;
 
   if (authHeader.startsWith('Bearer ')) {
     token = authHeader.slice('Bearer '.length).trim();
-  } else {
-    const cookies = parseCookies(request.headers.get('Cookie') || '');
-    if (cookies.dtks_access_token) {
-      token = cookies.dtks_access_token;
-      usedCookieAuth = true;
-    }
+  } else if (cookies.dtks_access_token) {
+    token = cookies.dtks_access_token;
+    usedCookieAuth = true;
   }
 
   if (!token) {
@@ -81,21 +94,15 @@ export async function authenticateAdmin(
     };
   }
 
-  // CSRF protection when cookie-based authentication is used on state-changing requests
-  const method = (request.method || 'GET').toUpperCase();
-  if (usedCookieAuth && !['GET', 'HEAD', 'OPTIONS'].includes(method)) {
-    const cookies = parseCookies(request.headers.get('Cookie') || '');
-    const csrfHeader = request.headers.get('X-CSRF-Token') || '';
-    if (!csrfHeader || !cookies.dtks_csrf_token || csrfHeader !== cookies.dtks_csrf_token) {
-      return {
-        authenticated: false,
-        response: errorResponse(
-          'CSRF token validation failed for cookie-authenticated request.',
-          403,
-          'CSRF_VALIDATION_FAILED'
-        ),
-      };
-    }
+  if (usedCookieAuth && !validateCookieCsrf(request, cookies, 'dtks_csrf_token')) {
+    return {
+      authenticated: false,
+      response: errorResponse(
+        'CSRF token validation failed for cookie-authenticated request.',
+        403,
+        'CSRF_VALIDATION_FAILED'
+      ),
+    };
   }
 
   let decoded;
@@ -125,8 +132,21 @@ export async function authenticateAdmin(
     };
   }
 
+  if (decoded.accountType && decoded.accountType !== 'admin') {
+    return {
+      authenticated: false,
+      response: errorResponse(
+        'Client authentication tokens cannot access administrator endpoints.',
+        401,
+        'INVALID_TOKEN_TYPE'
+      ),
+    };
+  }
+
   const adminRow = await env.DB.prepare(
-    'SELECT id, name, email, role, is_active, created_at, updated_at, last_login_at FROM admins WHERE id = ?'
+    `SELECT id, name, email, role, is_active, token_version, invited_by_admin_id,
+            invite_accepted_at, deactivated_at, created_at, updated_at, last_login_at
+     FROM admins WHERE id = ?`
   )
     .bind(decoded.sub)
     .first();
@@ -145,6 +165,21 @@ export async function authenticateAdmin(
         'This administrator account has been deactivated.',
         403,
         'ACCOUNT_DEACTIVATED'
+      ),
+    };
+  }
+
+  const dbTokenVersion = Number(adminRow.token_version ?? 1);
+  if (
+    (decoded.tv !== undefined && Number(decoded.tv) !== dbTokenVersion) ||
+    (decoded.tv === undefined && dbTokenVersion > 1)
+  ) {
+    return {
+      authenticated: false,
+      response: errorResponse(
+        'Your session has been revoked. Please sign in again.',
+        401,
+        'SESSION_REVOKED'
       ),
     };
   }
@@ -169,6 +204,12 @@ export async function authenticateAdmin(
       role: adminRow.role,
       is_active: Boolean(adminRow.is_active),
       isActive: Boolean(adminRow.is_active),
+      invited_by_admin_id: adminRow.invited_by_admin_id || null,
+      invitedByAdminId: adminRow.invited_by_admin_id || null,
+      invite_accepted_at: adminRow.invite_accepted_at || null,
+      inviteAcceptedAt: adminRow.invite_accepted_at || null,
+      deactivated_at: adminRow.deactivated_at || null,
+      deactivatedAt: adminRow.deactivated_at || null,
       created_at: adminRow.created_at,
       createdAt: adminRow.created_at,
       updated_at: adminRow.updated_at,
@@ -177,4 +218,176 @@ export async function authenticateAdmin(
       lastLoginAt: adminRow.last_login_at,
     },
   };
+}
+
+/**
+ * Dedicated Client Authentication Middleware (`authenticateClient`).
+ * Strictly isolated from `authenticateAdmin`:
+ *   - Requires `decoded.accountType === 'client'` and `decoded.type === 'access'`.
+ *   - Rejects all Admin JWTs.
+ *   - Verifies account existence, active status, email verification status, and `token_version`.
+ */
+export async function authenticateClient(
+  request,
+  env,
+  { requireVerified = true } = {}
+) {
+  const authHeader = request.headers.get('Authorization') || '';
+  const cookies = parseCookies(request.headers.get('Cookie') || '');
+  let token = '';
+  let usedCookieAuth = false;
+
+  if (authHeader.startsWith('Bearer ')) {
+    token = authHeader.slice('Bearer '.length).trim();
+  } else if (cookies.dtks_client_access_token) {
+    token = cookies.dtks_client_access_token;
+    usedCookieAuth = true;
+  }
+
+  if (!token) {
+    return {
+      authenticated: false,
+      response: errorResponse(
+        'Authentication required. Please sign in to your client account.',
+        401,
+        'UNAUTHORIZED'
+      ),
+    };
+  }
+
+  if (usedCookieAuth && !validateCookieCsrf(request, cookies, 'dtks_client_csrf_token')) {
+    return {
+      authenticated: false,
+      response: errorResponse(
+        'CSRF token validation failed for cookie-authenticated request.',
+        403,
+        'CSRF_VALIDATION_FAILED'
+      ),
+    };
+  }
+
+  let decoded;
+  try {
+    decoded = await verifyJwt(token, getJwtSecret(env));
+  } catch (err) {
+    if (err.code === 'SERVER_MISCONFIGURED') {
+      throw err;
+    }
+    const code = err.code === 'TOKEN_EXPIRED' ? 'TOKEN_EXPIRED' : 'INVALID_TOKEN';
+    return {
+      authenticated: false,
+      response: errorResponse(
+        err.code === 'TOKEN_EXPIRED'
+          ? 'Your session has expired. Please refresh or sign in again.'
+          : 'Invalid authentication token.',
+        401,
+        code
+      ),
+    };
+  }
+
+  if (decoded.type !== 'access' || decoded.accountType !== 'client') {
+    return {
+      authenticated: false,
+      response: errorResponse(
+        'Invalid token type for client portal access.',
+        401,
+        'INVALID_TOKEN_TYPE'
+      ),
+    };
+  }
+
+  const accountRow = await env.DB.prepare(
+    `SELECT id, customer_id, full_name, email, phone, city, business_name,
+            is_email_verified, email_verified_at, is_active, deactivated_at,
+            token_version, last_login_at, created_at, updated_at
+     FROM customer_accounts WHERE id = ?`
+  )
+    .bind(decoded.sub)
+    .first();
+
+  if (!accountRow) {
+    return {
+      authenticated: false,
+      response: errorResponse('Client account not found.', 401, 'CLIENT_NOT_FOUND'),
+    };
+  }
+
+  if (!accountRow.is_active) {
+    return {
+      authenticated: false,
+      response: errorResponse(
+        'This client account has been deactivated.',
+        403,
+        'ACCOUNT_DEACTIVATED'
+      ),
+    };
+  }
+
+  if (requireVerified && !accountRow.is_email_verified) {
+    return {
+      authenticated: false,
+      response: errorResponse(
+        'Please verify your email address before accessing your client account.',
+        403,
+        'EMAIL_NOT_VERIFIED'
+      ),
+    };
+  }
+
+  const dbTokenVersion = Number(accountRow.token_version ?? 1);
+  if (typeof decoded.tv !== 'number' || Number(decoded.tv) !== dbTokenVersion) {
+    return {
+      authenticated: false,
+      response: errorResponse(
+        'Your session has been revoked. Please sign in again.',
+        401,
+        'SESSION_REVOKED'
+      ),
+    };
+  }
+
+  return {
+    authenticated: true,
+    client: {
+      id: accountRow.id,
+      customer_id: accountRow.customer_id || null,
+      customerId: accountRow.customer_id || null,
+      full_name: accountRow.full_name,
+      fullName: accountRow.full_name,
+      email: accountRow.email,
+      phone: accountRow.phone,
+      city: accountRow.city || '',
+      business_name: accountRow.business_name || '',
+      businessName: accountRow.business_name || '',
+      is_email_verified: Boolean(accountRow.is_email_verified),
+      isEmailVerified: Boolean(accountRow.is_email_verified),
+      email_verified_at: accountRow.email_verified_at || null,
+      emailVerifiedAt: accountRow.email_verified_at || null,
+      is_active: Boolean(accountRow.is_active),
+      isActive: Boolean(accountRow.is_active),
+      deactivated_at: accountRow.deactivated_at || null,
+      deactivatedAt: accountRow.deactivated_at || null,
+      last_login_at: accountRow.last_login_at || null,
+      lastLoginAt: accountRow.last_login_at || null,
+      created_at: accountRow.created_at,
+      createdAt: accountRow.created_at,
+      updated_at: accountRow.updated_at,
+      updatedAt: accountRow.updated_at,
+    },
+  };
+}
+
+/**
+ * Optional client session resolver for endpoints supporting both guests and logged-in clients
+ * (e.g., `POST /api/v1/orders`). Never throws or blocks unauthenticated guests.
+ */
+export async function getOptionalAuthenticatedClient(request, env) {
+  const authHeader = request.headers.get('Authorization') || '';
+  const cookies = parseCookies(request.headers.get('Cookie') || '');
+  if (!authHeader.startsWith('Bearer ') && !cookies.dtks_client_access_token) {
+    return null;
+  }
+  const result = await authenticateClient(request, env, { requireVerified: true });
+  return result.authenticated ? result.client : null;
 }

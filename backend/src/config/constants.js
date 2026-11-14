@@ -37,6 +37,26 @@ export const VALID_ADMIN_ROLES = [
   'editor',
 ];
 
+export const PENDING_INVITE_PASSWORD_SENTINEL = '!PENDING_INVITE_SETUP';
+
+export const ADMIN_INVITE_EXPIRY_SECONDS = 48 * 60 * 60; // 48 hours
+export const CLIENT_EMAIL_VERIFICATION_EXPIRY_SECONDS = 24 * 60 * 60; // 24 hours
+export const CLIENT_PASSWORD_RESET_EXPIRY_SECONDS = 60 * 60; // 1 hour
+
+export const QUOTATION_ORDER_STATUSES = [
+  'Quotation Sent',
+  'Awaiting Customer Approval',
+  'Approved',
+];
+
+export const PROJECT_ORDER_STATUSES = [
+  'Approved',
+  'InProgress',
+  'In Progress',
+  'Under Testing',
+  'Completed',
+];
+
 export const ALLOWED_IMAGE_MIME_TYPES = [
   'image/jpeg',
   'image/png',

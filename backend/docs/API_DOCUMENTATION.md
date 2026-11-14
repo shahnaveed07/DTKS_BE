@@ -24,7 +24,7 @@
 | Method | Endpoint | Purpose | Success Status | Failure Status |
 | :--- | :--- | :--- | :--- | :--- |
 | `GET` | `/api/v1/health` | **Liveness Check** — Verifies the Worker is running without touching D1, R2, seeding, or DB rate limiting | `200 OK` (`status: "healthy"`) | N/A |
-| `GET` | `/api/v1/ready` | **Readiness Check** — Verifies D1 binding, D1 connection, all 13 schema tables, and R2 `ASSETS_BUCKET` binding | `200 OK` (`status: "ready"`, `database: "connected"`, `schema: "valid"`, `storage: "available"`) | `503 Service Unavailable` (`status: "not_ready"`) |
+| `GET` | `/api/v1/ready` | **Readiness Check** — Verifies D1 binding, D1 connection, all 17 schema tables, and R2 `ASSETS_BUCKET` binding | `200 OK` (`status: "ready"`, `database: "connected"`, `schema: "valid"`, `storage: "available"`) | `503 Service Unavailable` (`status: "not_ready"`) |
 
 
 ---
@@ -36,7 +36,8 @@
 {
   "success": true,
   "message": "Operation completed successfully.",
-  "data": {}
+  "data": {},
+  "timestamp": "2026-11-14T08:00:00.000Z"
 }
 ```
 
@@ -50,20 +51,23 @@
     "details": {
       "customerEmail": "A valid customer email address is required."
     }
-  }
+  },
+  "timestamp": "2026-11-14T08:00:00.000Z"
 }
 ```
 
 ### HTTP Status Codes
 - `200 OK` – Request succeeded.
-- `201 Created` – Resource created (`POST /services`, `POST /packages`, `POST /portfolio`, `POST /orders`, `POST /contact`, `POST /portfolio/upload`).
+- `201 Created` – Resource created (`POST /services`, `POST /packages`, `POST /portfolio`, `POST /orders`, `POST /contact`, `POST /portfolio/upload`, `POST /admin/accounts`, `POST /client/auth/register`).
 - `204 No Content` – CORS `OPTIONS` preflight succeeded.
-- `400 Bad Request` – Input validation failed (`VALIDATION_ERROR`, `INVALID_STATUS`, `INVALID_IMAGE_UPLOAD`).
-- `401 Unauthorized` – Missing, invalid, or expired JWT access/refresh token (`UNAUTHORIZED`, `INVALID_CREDENTIALS`, `INVALID_REFRESH_TOKEN`).
-- `403 Forbidden` – Origin blocked by CORS policy (`CORS_ORIGIN_FORBIDDEN`), missing CSRF header on cookie-authenticated mutation (`CSRF_VALIDATION_FAILED`), or insufficient role permissions (`FORBIDDEN`).
+- `400 Bad Request` – Input validation failed (`VALIDATION_ERROR`, `INVALID_STATUS`, `INVALID_IMAGE_UPLOAD`, `INVALID_INVITE_TOKEN`, `INVITE_TOKEN_EXPIRED`, `INVITE_TOKEN_ALREADY_USED`, `INVALID_VERIFICATION_TOKEN`, `VERIFICATION_TOKEN_USED`, `VERIFICATION_TOKEN_EXPIRED`, `INVALID_RESET_TOKEN`, `RESET_TOKEN_USED`, `RESET_TOKEN_EXPIRED`).
+- `401 Unauthorized` – Missing, invalid, revoked, or expired JWT access/refresh token (`UNAUTHORIZED`, `INVALID_CREDENTIALS`, `INVALID_REFRESH_TOKEN`, `SESSION_REVOKED`).
+- `403 Forbidden` – Origin blocked by CORS policy (`CORS_ORIGIN_FORBIDDEN`), CSRF check failed (`CSRF_VALIDATION_FAILED`), email not verified (`EMAIL_NOT_VERIFIED`), pending admin invite (`INVITE_PENDING`), account deactivated (`ACCOUNT_DEACTIVATED`), or insufficient role permissions (`FORBIDDEN`).
 - `404 Not Found` – Resource or endpoint not found (`NOT_FOUND`, `ORDER_NOT_FOUND`, `ASSET_NOT_FOUND`).
+- `409 Conflict` – Duplicate registration or protected last active super admin (`ADMIN_EMAIL_EXISTS`, `REGISTRATION_CONFLICT`, `LAST_SUPER_ADMIN_PROTECTED`).
 - `429 Too Many Requests` – Rate limit exceeded (`RATE_LIMIT_EXCEEDED`, includes `Retry-After` header).
 - `500 Internal Server Error` – Unexpected server error (`INTERNAL_SERVER_ERROR`, internal stack traces are never leaked).
+- `503 Service Unavailable` – Dependency or transactional email provider unavailable (`SERVICE_NOT_READY`, `EMAIL_PROVIDER_UNCONFIGURED`, `EMAIL_DELIVERY_FAILED`).
 
 ---
 
@@ -78,17 +82,24 @@
 
 Requests with an unauthorized `Origin` header receive `403 Forbidden` (`CORS_ORIGIN_FORBIDDEN`).
 
-### Authentication Headers
-Admin endpoints accept either:
+### CORS Headers & Authentication Transport
+CORS preflight (`OPTIONS`) permits:
+- `Access-Control-Allow-Methods: GET, POST, PUT, PATCH, DELETE, OPTIONS`
+- `Access-Control-Allow-Headers: Content-Type, Authorization, X-CSRF-Token, X-Requested-With, Accept`
+- `Access-Control-Expose-Headers: X-Request-Id, X-RateLimit-Limit, X-RateLimit-Remaining, Retry-After`
+- `Access-Control-Allow-Credentials: true` (for allowlisted origins)
+
+Protected endpoints accept either:
 1. **Bearer Token Header (Recommended for SPA):**
    ```http
    Authorization: Bearer <accessToken>
    ```
+   *(If the frontend also attaches `X-CSRF-Token` on authenticated requests, CORS allows it cleanly.)*
 2. **HttpOnly Cookie + CSRF Token Header:**
-   ```http
-   Cookie: dtks_access_token=<accessToken>; dtks_csrf_token=<csrfToken>
-   X-CSRF-Token: <csrfToken>
-   ```
+   - **Admin:** `Cookie: dtks_access_token=<accessToken>; dtks_csrf_token=<csrfToken>` + `X-CSRF-Token: <csrfToken>`
+   - **Client:** `Cookie: dtks_client_access_token=<accessToken>; dtks_client_csrf_token=<csrfToken>` + `X-CSRF-Token: <csrfToken>`
+
+> **Strict Token Isolation:** Admin JWTs (`accountType: "admin"`) are rejected by all `/api/v1/client/*` routes (`401`), and Client JWTs (`accountType: "client"`) are rejected by all Admin routes (`401`).
 
 ---
 
@@ -137,19 +148,83 @@ Validates a refresh token against `refresh_sessions`, revokes the old session (`
 Revokes the active refresh session in `refresh_sessions` and clears auth cookies.
 
 #### `GET /api/v1/auth/me`
-- **Auth Required:** Yes (`BearerAuth`)
+- **Auth Required:** Yes (`BearerAuth` - Admin)
 - **Response (`200 OK`):** Current administrator profile.
 
+#### `PATCH /api/v1/auth/profile`
+- **Auth Required:** Yes (`BearerAuth` - Admin)
+- **Request Body:** `{ "name": "Updated Admin Name" }`
+- **Security:** Rejects `role`, `isActive`, `email`, `id`, `password`, or `password_hash` with `400 VALIDATION_ERROR`.
+
 #### `POST /api/v1/auth/change-password`
-- **Auth Required:** Yes (`BearerAuth`)
+- **Auth Required:** Yes (`BearerAuth` - Admin)
 - **Request Body:**
   ```json
   {
     "currentPassword": "OldPassword123!",
-    "newPassword": "NewSecurePassword2026!"
+    "newPassword": "NewSecurePassword2026!",
+    "confirmPassword": "NewSecurePassword2026!"
   }
   ```
-- **Behavior:** Re-hashes password, revokes all prior refresh sessions in `refresh_sessions`, and issues a fresh token pair.
+- **Behavior:** Re-hashes password, increments `token_version` (invalidating active tokens), and revokes all prior refresh sessions in `refresh_sessions`.
+
+#### `POST /api/v1/auth/accept-invite`
+- **Auth Required:** Public (Rate-limited: 20 req / 15 min per IP)
+- **Request Body:**
+  ```json
+  {
+    "token": "<rawInviteToken>",
+    "password": "StrongAdminPassword#2026",
+    "confirmPassword": "StrongAdminPassword#2026"
+  }
+  ```
+- **Behavior:** Validates single-use SHA-256-hashed invitation token (48h expiry), hashes strong password, sets `is_active = 1` and `invite_accepted_at`, marks token used, and logs `ADMIN_INVITE_ACCEPTED`.
+
+---
+
+### 4.1B Admin Account Management (`/api/v1/admin/accounts`)
+
+| Method | Endpoint | Auth / Role | Description |
+| :--- | :--- | :--- | :--- |
+| `GET` | `/api/v1/admin/accounts` | `super_admin`, `admin` | List admin accounts with `activeSessionCount` and `invitePending` (supports `?role=`, `?isActive=`, `?search=`) |
+| `GET` | `/api/v1/admin/accounts/:id` | `super_admin`, `admin` | Inspect admin account, recent refresh sessions, and latest invitation metadata |
+| `POST` | `/api/v1/admin/accounts` | `super_admin` only | Create pending admin account (`isActive: false`) and dispatch 48h invitation email via Resend |
+| `POST` | `/api/v1/admin/accounts/:id/resend-invite` | `super_admin` only | Revoke prior unused invite tokens and resend fresh invitation email for pending admins |
+| `PATCH` | `/api/v1/admin/accounts/:id` | `super_admin` only | Update `name` and/or `role` (`super_admin`, `admin`, `editor`). Role changes revoke all sessions & bump `token_version`. Protects last active `super_admin` (`409 LAST_SUPER_ADMIN_PROTECTED`) |
+| `PATCH` | `/api/v1/admin/accounts/:id/status` | `super_admin` only | Activate (`{ "isActive": true }`) or deactivate (`{ "isActive": false }`) an account. Deactivation sets `deactivated_at`, bumps `token_version`, and revokes sessions. Protects last active `super_admin` |
+| `DELETE` | `/api/v1/admin/accounts/:id/sessions` | `super_admin` only | Revoke all active refresh sessions and bump `token_version` so existing access tokens fail immediately (`401 SESSION_REVOKED`) |
+
+---
+
+### 4.1C Client Registration & Authentication (`/api/v1/client/auth`)
+
+| Method | Endpoint | Auth | Rate Limit | Description |
+| :--- | :--- | :--- | :--- | :--- |
+| `POST` | `/api/v1/client/auth/register` | Public | 10 / 15m | Register client account (`fullName`, `email`, `phone`, `password`, `confirmPassword`, optional `city`, `businessName`), send 24h verification email (`503` if email provider unconfigured/fails) |
+| `POST` | `/api/v1/client/auth/resend-verification` | Public | 15 / 15m | Resend verification link (`{ "email" }`); returns uniform `200 OK` when provider is configured to prevent email enumeration |
+| `POST` | `/api/v1/client/auth/verify-email` | Public | 15 / 15m | Verify single-use SHA-256-hashed token (`{ "token" }`), activate email verification, and safely link existing `customers` + historical unlinked `orders` matching verified email |
+| `POST` | `/api/v1/client/auth/login` | Public | 10 / 15m | Authenticate verified, active client; returns `accessToken`, rotated `refreshToken`, `csrfToken`, `expiresIn`, and `client` profile |
+| `POST` | `/api/v1/client/auth/refresh` | Public | 30 / 15m | Rotate `customer_refresh_sessions` token and issue new access + refresh token pair |
+| `POST` | `/api/v1/client/auth/logout` | Client or Refresh Token | General | Revoke current refresh token (or all sessions + bump `token_version` when authenticated without body token) |
+| `GET` | `/api/v1/client/auth/me` | Client (`BearerAuth`) | General | Get current authenticated client profile |
+| `PATCH` | `/api/v1/client/auth/profile` | Client (`BearerAuth`) | General | Update `fullName`, `phone`, `city`, `businessName` (synced to linked `customers` row; rejects `email`, `role`, `isActive`, etc.) |
+| `POST` | `/api/v1/client/auth/change-password` | Client (`BearerAuth`) | General | Verify `currentPassword`, set strong `newPassword`, revoke all sessions, bump `token_version`, and send security notification email |
+| `POST` | `/api/v1/client/auth/forgot-password` | Public | 8 / 15m | Issue 1h single-use SHA-256-hashed password reset token via Resend (`503` if unconfigured; otherwise uniform `200 OK`) |
+| `POST` | `/api/v1/client/auth/reset-password` | Public | 8 / 15m | Consume single-use reset token (`token`, `password`, `confirmPassword`), revoke all sessions, bump `token_version`, and send security notification email |
+| `POST` | `/api/v1/client/auth/deactivate` | Client (`BearerAuth`) | General | Confirm `password`, deactivate account (`isActive: false`), revoke all sessions, bump `token_version`, and send security alert email |
+
+---
+
+### 4.1D Client-Only Data Access (`/api/v1/client`)
+
+All endpoints require a valid **Client** JWT (`authenticateClient`) and strictly scope records to `client.customerId`. Internal fields (`admin_notes`, `changed_by_admin_id`) are never returned.
+
+| Method | Endpoint | Auth | Description |
+| :--- | :--- | :--- | :--- |
+| `GET` | `/api/v1/client/orders` | Client | List authenticated client's orders (supports `?status=` and `?search=`) |
+| `GET` | `/api/v1/client/orders/:id` | Client | Get single client order by ID or `order_number`, including line items and sanitized `statusHistory` (`404` if not owned by client) |
+| `GET` | `/api/v1/client/quotations` | Client | List client orders with quotations (`quotationAmount`, `quotationCurrency`, `quotationNotes`, `expectedDeliveryDate`, `expectedTimeline`, `customerUpdate`) |
+| `GET` | `/api/v1/client/projects` | Client | List client active/completed project records (`Approved`, `InProgress`, `Development`, `Completed`, plus technical scope & `customerUpdate`) |
 
 ---
 
@@ -289,10 +364,12 @@ Revokes the active refresh session in `refresh_sessions` and clears auth cookies
 
 ## 5. Role-Based Access Control (RBAC)
 
-| Role | Permitted Actions | Restricted Actions (`403 Forbidden`) |
+| Actor / Role | Permitted Actions | Restricted Actions |
 | :--- | :--- | :--- |
-| `super_admin` / `admin` | Full access to all endpoints (`GET`, `POST`, `PUT`, `PATCH`, `DELETE`), site settings, package configurations, and activity logs | None |
-| `editor` | Create and update services, packages, portfolio items, R2 uploads, order status/quotations, and contact inquiry statuses | Cannot `DELETE` services, packages, portfolio items, R2 objects, orders, or inquiries; cannot `PUT /api/v1/settings` or `PUT /api/v1/packages/config/*`; cannot view `/api/v1/admin/activity-logs` |
+| `super_admin` | Full access to all admin & workspace endpoints **plus** `/api/v1/admin/accounts` creation (invite), role changes, activation/deactivation, resend invites, and session revocation | Cannot demote or deactivate the last active `super_admin` (`409 LAST_SUPER_ADMIN_PROTECTED`); cannot access `/api/v1/client/*` (`401`) |
+| `admin` | Full workspace access (`DELETE`, `PUT /settings`, package configs, activity logs, notifications) and **read-only** `GET /api/v1/admin/accounts` & `GET /api/v1/admin/accounts/:id` | Cannot create admins (`POST /admin/accounts`), edit roles/statuses (`PATCH`), resend invites, or revoke sessions (`403 FORBIDDEN`); cannot access `/api/v1/client/*` (`401`) |
+| `editor` | Create and update services, packages, portfolio items, R2 uploads, order status/quotations, and contact inquiry statuses | Cannot `DELETE` services, packages, portfolio items, R2 objects, orders, or inquiries; cannot `PUT /api/v1/settings` or `PUT /api/v1/packages/config/*`; cannot view `/api/v1/admin/activity-logs`, `/api/v1/admin/notifications`, or `/api/v1/admin/accounts*` (`403 FORBIDDEN`) |
+| `client` | Self-service `/api/v1/client/auth/*` (profile, change-password, deactivate, refresh, logout) and client-scoped `/api/v1/client/orders*`, `/quotations`, `/projects`, plus authenticated `POST /api/v1/orders` | Completely isolated from all Admin endpoints (`/api/v1/auth/*`, `/api/v1/admin/*`, admin mutations on services/packages/portfolio/orders/contact/settings -> `401`); cannot access another client's orders (`404`) |
 
 ---
 

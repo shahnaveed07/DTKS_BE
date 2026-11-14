@@ -7,6 +7,7 @@ import {
   generateRandomToken,
   sha256Hex,
 } from '../utils/crypto.js';
+import { PENDING_INVITE_PASSWORD_SENTINEL } from '../config/constants.js';
 import { successResponse, errorResponse, parseJsonBody } from '../utils/response.js';
 import { validateLoginInput, validateChangePasswordInput } from '../validators/schemas.js';
 import { getJwtSecret } from '../middleware/authMiddleware.js';
@@ -14,11 +15,21 @@ import { getClientIp } from '../middleware/rateLimiter.js';
 import { logAdminActivity } from '../services/auditService.js';
 
 function getAccessExpiresSeconds(env) {
-  return Number.parseInt(env.JWT_ACCESS_EXPIRES_IN || '900', 10) || 900;
+  return (
+    Number.parseInt(
+      env.JWT_ACCESS_EXPIRES_IN || env.JWT_ACCESS_EXPIRY_SECONDS || '900',
+      10
+    ) || 900
+  );
 }
 
 function getRefreshExpiresSeconds(env) {
-  return Number.parseInt(env.JWT_REFRESH_EXPIRES_IN || '604800', 10) || 604800;
+  return (
+    Number.parseInt(
+      env.JWT_REFRESH_EXPIRES_IN || env.JWT_REFRESH_EXPIRY_SECONDS || '604800',
+      10
+    ) || 604800
+  );
 }
 
 function mapAdminResponse(row, lastLoginOverride = null) {
@@ -31,6 +42,12 @@ function mapAdminResponse(row, lastLoginOverride = null) {
     role: row.role,
     is_active: Boolean(row.is_active),
     isActive: Boolean(row.is_active),
+    invited_by_admin_id: row.invited_by_admin_id || null,
+    invitedByAdminId: row.invited_by_admin_id || null,
+    invite_accepted_at: row.invite_accepted_at || null,
+    inviteAcceptedAt: row.invite_accepted_at || null,
+    deactivated_at: row.deactivated_at || null,
+    deactivatedAt: row.deactivated_at || null,
     created_at: row.created_at,
     createdAt: row.created_at,
     updated_at: row.updated_at,
@@ -49,13 +66,24 @@ export async function loginAdmin(request, env) {
 
   const { email, password } = validation.data;
   const admin = await env.DB.prepare(
-    'SELECT id, name, email, password_hash, role, is_active, created_at, updated_at, last_login_at FROM admins WHERE lower(email) = lower(?)'
+    `SELECT id, name, email, password_hash, role, is_active, token_version,
+            invited_by_admin_id, invite_accepted_at, deactivated_at,
+            created_at, updated_at, last_login_at
+     FROM admins WHERE lower(email) = lower(?)`
   )
     .bind(email)
     .first();
 
   if (!admin) {
     return errorResponse('Invalid email or password.', 401, 'INVALID_CREDENTIALS');
+  }
+
+  if (admin.password_hash === PENDING_INVITE_PASSWORD_SENTINEL) {
+    return errorResponse(
+      'Administrator invitation is pending password setup. Please accept your invitation link first.',
+      403,
+      'INVITE_PENDING'
+    );
   }
 
   if (!admin.is_active) {
@@ -105,13 +133,16 @@ export async function loginAdmin(request, env) {
 
   const accessExp = getAccessExpiresSeconds(env);
   const refreshExp = getRefreshExpiresSeconds(env);
+  const tokenVersion = Number(admin.token_version ?? 1);
 
   const accessToken = await signJwt(
     {
       sub: admin.id,
       email: admin.email,
       role: admin.role,
+      accountType: 'admin',
       type: 'access',
+      tv: tokenVersion,
     },
     getJwtSecret(env),
     accessExp
@@ -192,6 +223,11 @@ export async function logoutAdmin(request, env, currentAdmin) {
     await env.DB.prepare('UPDATE refresh_sessions SET revoked_at = ? WHERE admin_id = ?')
       .bind(now, currentAdmin.id)
       .run();
+    await env.DB.prepare(
+      'UPDATE admins SET token_version = COALESCE(token_version, 1) + 1, updated_at = ? WHERE id = ?'
+    )
+      .bind(now, currentAdmin.id)
+      .run();
   }
 
   if (currentAdmin?.id) {
@@ -239,12 +275,15 @@ export async function refreshAdminToken(request, env) {
   }
 
   const admin = await env.DB.prepare(
-    'SELECT id, name, email, role, is_active, created_at, updated_at, last_login_at FROM admins WHERE id = ?'
+    `SELECT id, name, email, password_hash, role, is_active, token_version,
+            invited_by_admin_id, invite_accepted_at, deactivated_at,
+            created_at, updated_at, last_login_at
+     FROM admins WHERE id = ?`
   )
     .bind(session.admin_id)
     .first();
 
-  if (!admin || !admin.is_active) {
+  if (!admin || !admin.is_active || admin.password_hash === PENDING_INVITE_PASSWORD_SENTINEL) {
     await env.DB.prepare('DELETE FROM refresh_sessions WHERE id = ?').bind(session.id).run();
     return errorResponse('Administrator account is not active.', 403, 'ACCOUNT_DEACTIVATED');
   }
@@ -257,13 +296,16 @@ export async function refreshAdminToken(request, env) {
 
   const accessExp = getAccessExpiresSeconds(env);
   const refreshExp = getRefreshExpiresSeconds(env);
+  const tokenVersion = Number(admin.token_version ?? 1);
 
   const newAccessToken = await signJwt(
     {
       sub: admin.id,
       email: admin.email,
       role: admin.role,
+      accountType: 'admin',
       type: 'access',
+      tv: tokenVersion,
     },
     getJwtSecret(env),
     accessExp
@@ -316,6 +358,7 @@ export async function changeAdminPassword(request, env, admin) {
   const validation = validateChangePasswordInput({
     currentPassword: body.currentPassword ?? body.current_password,
     newPassword: body.newPassword ?? body.new_password,
+    confirmPassword: body.confirmPassword ?? body.confirm_password,
   });
   if (!validation.isValid) {
     return errorResponse('Password validation failed.', 400, 'VALIDATION_ERROR', validation.errors);
@@ -338,7 +381,9 @@ export async function changeAdminPassword(request, env, admin) {
   const newHash = await hashPassword(newPassword);
   const now = new Date().toISOString();
 
-  await env.DB.prepare('UPDATE admins SET password_hash = ?, updated_at = ? WHERE id = ?')
+  await env.DB.prepare(
+    'UPDATE admins SET password_hash = ?, token_version = COALESCE(token_version, 1) + 1, updated_at = ? WHERE id = ?'
+  )
     .bind(newHash, now, admin.id)
     .run();
 
@@ -352,7 +397,7 @@ export async function changeAdminPassword(request, env, admin) {
     action: 'PASSWORD_CHANGED',
     entityType: 'Admin',
     entityId: admin.id,
-    details: 'Administrator updated account password',
+    details: 'Administrator updated account password and revoked active sessions',
     request,
   });
 
@@ -361,6 +406,18 @@ export async function changeAdminPassword(request, env, admin) {
 
 export async function updateAdminProfile(request, env, admin) {
   const body = await parseJsonBody(request);
+  const forbiddenKeys = ['role', 'isActive', 'is_active', 'email', 'id', 'password', 'password_hash'];
+  for (const key of forbiddenKeys) {
+    if (Object.prototype.hasOwnProperty.call(body, key)) {
+      return errorResponse(
+        `Field "${key}" cannot be modified via profile update.`,
+        400,
+        'VALIDATION_ERROR',
+        { [key]: 'Field is not editable on profile.' }
+      );
+    }
+  }
+
   const name = typeof body.name === 'string' ? body.name.trim() : admin.name;
   if (!name || name.length < 2) {
     return errorResponse('Administrator name must be at least 2 characters.', 400, 'VALIDATION_ERROR');

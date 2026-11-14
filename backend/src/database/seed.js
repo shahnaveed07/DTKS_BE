@@ -679,8 +679,12 @@ function isValidBootstrapPassword(password, isProduction = false) {
 
 export const REQUIRED_D1_TABLES = [
   'admins',
+  'admin_invitations',
   'refresh_sessions',
   'customers',
+  'customer_accounts',
+  'customer_refresh_sessions',
+  'customer_auth_tokens',
   'services',
   'packages',
   'portfolio',

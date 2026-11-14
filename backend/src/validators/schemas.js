@@ -1,15 +1,37 @@
 import {
   VALID_ORDER_STATUSES,
   VALID_CONTACT_STATUSES,
+  VALID_ADMIN_ROLES,
   ALLOWED_IMAGE_MIME_TYPES,
   MAX_IMAGE_SIZE_BYTES,
 } from '../config/constants.js';
 import { sanitizeText } from '../utils/response.js';
 
+const COMMON_WEAK_PASSWORDS = new Set([
+  'password',
+  'password123',
+  'password123!',
+  '12345678',
+  '123456789',
+  '1234567890',
+  'qwerty123',
+  'admin123',
+  'admin1234',
+  'letmein123',
+  'welcome123',
+  'changeme123',
+]);
+
+export function normalizeEmail(email) {
+  if (typeof email !== 'string') return '';
+  return sanitizeText(email, 254).toLowerCase();
+}
+
 export function isValidEmail(email) {
   if (typeof email !== 'string') return false;
   const trimmed = email.trim();
   if (trimmed.length < 5 || trimmed.length > 254) return false;
+  if (trimmed.includes('..')) return false;
   return /^[^\s@]+@[^\s@]+\.[^\s@]{2,}$/.test(trimmed);
 }
 
@@ -17,6 +39,52 @@ export function isValidPhone(phone) {
   if (typeof phone !== 'string') return false;
   const digits = phone.replace(/[^\d]/g, '');
   return digits.length >= 7 && digits.length <= 15;
+}
+
+export function validateStrongPassword(password) {
+  if (typeof password !== 'string' || password.length < 8) {
+    return {
+      isValid: false,
+      error: 'Password must be at least 8 characters long.',
+    };
+  }
+  if (password.length > 128) {
+    return {
+      isValid: false,
+      error: 'Password cannot exceed 128 characters.',
+    };
+  }
+  if (COMMON_WEAK_PASSWORDS.has(password.toLowerCase().trim())) {
+    return {
+      isValid: false,
+      error: 'Password is too common. Please choose a stronger password.',
+    };
+  }
+  if (!/[a-z]/.test(password)) {
+    return {
+      isValid: false,
+      error: 'Password must contain at least one lowercase letter.',
+    };
+  }
+  if (!/[A-Z]/.test(password)) {
+    return {
+      isValid: false,
+      error: 'Password must contain at least one uppercase letter.',
+    };
+  }
+  if (!/[0-9]/.test(password)) {
+    return {
+      isValid: false,
+      error: 'Password must contain at least one number.',
+    };
+  }
+  if (!/[^A-Za-z0-9]/.test(password)) {
+    return {
+      isValid: false,
+      error: 'Password must contain at least one special character.',
+    };
+  }
+  return { isValid: true };
 }
 
 export function slugifyText(value = '') {
@@ -29,11 +97,11 @@ export function slugifyText(value = '') {
 
 export function validateLoginInput(body = {}) {
   const errors = {};
-  const email = sanitizeText(body.email, 254).toLowerCase();
+  const email = normalizeEmail(body.email);
   const password = typeof body.password === 'string' ? body.password : '';
 
   if (!isValidEmail(email)) {
-    errors.email = 'A valid administrator email address is required.';
+    errors.email = 'A valid email address is required.';
   }
   if (!password || password.length < 6 || password.length > 256) {
     errors.password = 'A valid password is required.';
@@ -56,22 +124,301 @@ export function validateChangePasswordInput(body = {}) {
     typeof (body.newPassword ?? body.new_password) === 'string'
       ? body.newPassword ?? body.new_password
       : '';
+  const confirmPassword = body.confirmPassword ?? body.confirm_password;
 
   if (!currentPassword) {
     errors.currentPassword = 'Current password is required.';
   }
-  if (!newPassword || newPassword.length < 8) {
-    errors.newPassword = 'New password must be at least 8 characters long.';
-  } else if (newPassword.length > 128) {
-    errors.newPassword = 'New password cannot exceed 128 characters.';
+
+  const strength = validateStrongPassword(newPassword);
+  if (!strength.isValid) {
+    errors.newPassword = strength.error;
   } else if (currentPassword === newPassword) {
     errors.newPassword = 'New password must be different from your current password.';
+  }
+
+  if (confirmPassword !== undefined && confirmPassword !== newPassword) {
+    errors.confirmPassword = 'Confirm password must match the new password.';
   }
 
   return {
     isValid: Object.keys(errors).length === 0,
     errors,
     data: { currentPassword, newPassword },
+  };
+}
+
+export function validateAdminAccountCreate(body = {}) {
+  const errors = {};
+  const name = sanitizeText(body.name, 120);
+  const email = normalizeEmail(body.email);
+  const role = sanitizeText(body.role || 'admin', 40).toLowerCase();
+
+  if (!name || name.length < 2) {
+    errors.name = 'Administrator name must be at least 2 characters.';
+  }
+  if (!isValidEmail(email)) {
+    errors.email = 'A valid administrator email address is required.';
+  }
+  if (!VALID_ADMIN_ROLES.includes(role)) {
+    errors.role = `Invalid role. Allowed roles: ${VALID_ADMIN_ROLES.join(', ')}.`;
+  }
+
+  return {
+    isValid: Object.keys(errors).length === 0,
+    errors,
+    data: { name, email, role },
+  };
+}
+
+export function validateAdminAccountUpdate(body = {}) {
+  const errors = {};
+  const forbiddenKeys = [
+    'id',
+    'email',
+    'password',
+    'passwordHash',
+    'password_hash',
+    'tokenVersion',
+    'token_version',
+    'isActive',
+    'is_active',
+    'invitedByAdminId',
+    'invited_by_admin_id',
+  ];
+  for (const key of forbiddenKeys) {
+    if (Object.prototype.hasOwnProperty.call(body, key)) {
+      errors[key] = `Field "${key}" cannot be modified through this endpoint.`;
+    }
+  }
+
+  const data = {};
+  if (body.name !== undefined) {
+    const name = sanitizeText(body.name, 120);
+    if (!name || name.length < 2) {
+      errors.name = 'Administrator name must be at least 2 characters.';
+    } else {
+      data.name = name;
+    }
+  }
+
+  if (body.role !== undefined) {
+    const role = sanitizeText(body.role, 40).toLowerCase();
+    if (!VALID_ADMIN_ROLES.includes(role)) {
+      errors.role = `Invalid role. Allowed roles: ${VALID_ADMIN_ROLES.join(', ')}.`;
+    } else {
+      data.role = role;
+    }
+  }
+
+  if (Object.keys(data).length === 0 && Object.keys(errors).length === 0) {
+    errors.payload = 'At least one permitted field (name or role) must be provided.';
+  }
+
+  return {
+    isValid: Object.keys(errors).length === 0,
+    errors,
+    data,
+  };
+}
+
+export function validateAdminStatusUpdate(body = {}) {
+  const errors = {};
+  const raw = body.isActive !== undefined ? body.isActive : body.is_active;
+  if (typeof raw !== 'boolean') {
+    errors.isActive = 'A boolean "isActive" status value is required.';
+  }
+  return {
+    isValid: Object.keys(errors).length === 0,
+    errors,
+    data: { isActive: Boolean(raw) },
+  };
+}
+
+export function validateAcceptInviteInput(body = {}) {
+  const errors = {};
+  const token = typeof body.token === 'string' ? body.token.trim() : '';
+  const password = typeof body.password === 'string' ? body.password : '';
+  const confirmPassword =
+    typeof (body.confirmPassword ?? body.confirm_password) === 'string'
+      ? body.confirmPassword ?? body.confirm_password
+      : '';
+
+  if (!token || token.length < 16 || token.length > 256) {
+    errors.token = 'A valid invitation token is required.';
+  }
+  const strength = validateStrongPassword(password);
+  if (!strength.isValid) {
+    errors.password = strength.error;
+  }
+  if (!confirmPassword || confirmPassword !== password) {
+    errors.confirmPassword = 'Confirm password must match password.';
+  }
+
+  return {
+    isValid: Object.keys(errors).length === 0,
+    errors,
+    data: { token, password },
+  };
+}
+
+export function validateClientRegisterInput(body = {}) {
+  const errors = {};
+  const fullName = sanitizeText(
+    body.fullName ?? body.full_name ?? body.name,
+    160
+  );
+  const email = normalizeEmail(body.email);
+  const phone = sanitizeText(body.phone, 40);
+  const city = sanitizeText(body.city || '', 120);
+  const businessName = sanitizeText(body.businessName ?? body.business_name ?? '', 200);
+  const password = typeof body.password === 'string' ? body.password : '';
+  const confirmPassword =
+    typeof (body.confirmPassword ?? body.confirm_password) === 'string'
+      ? body.confirmPassword ?? body.confirm_password
+      : '';
+
+  if (!fullName || fullName.length < 2) {
+    errors.fullName = 'Full name is required (at least 2 characters).';
+  }
+  if (!isValidEmail(email)) {
+    errors.email = 'A valid email address is required.';
+  }
+  if (!isValidPhone(phone)) {
+    errors.phone = 'A valid phone number (7–15 digits) is required.';
+  }
+  const strength = validateStrongPassword(password);
+  if (!strength.isValid) {
+    errors.password = strength.error;
+  }
+  if (!confirmPassword || confirmPassword !== password) {
+    errors.confirmPassword = 'Confirm password must match password.';
+  }
+
+  return {
+    isValid: Object.keys(errors).length === 0,
+    errors,
+    data: { fullName, email, phone, city, businessName, password },
+  };
+}
+
+export function validateClientProfileUpdate(body = {}) {
+  const errors = {};
+  const forbiddenKeys = [
+    'id',
+    'email',
+    'role',
+    'customerId',
+    'customer_id',
+    'isEmailVerified',
+    'is_email_verified',
+    'isActive',
+    'is_active',
+    'password',
+    'passwordHash',
+    'password_hash',
+    'tokenVersion',
+    'token_version',
+  ];
+  for (const key of forbiddenKeys) {
+    if (Object.prototype.hasOwnProperty.call(body, key)) {
+      errors[key] = `Field "${key}" cannot be modified through profile update.`;
+    }
+  }
+
+  const data = {};
+  const rawName = body.fullName ?? body.full_name ?? body.name;
+  if (rawName !== undefined) {
+    const fullName = sanitizeText(rawName, 160);
+    if (!fullName || fullName.length < 2) {
+      errors.fullName = 'Full name must be at least 2 characters.';
+    } else {
+      data.fullName = fullName;
+    }
+  }
+
+  if (body.phone !== undefined) {
+    const phone = sanitizeText(body.phone, 40);
+    if (!isValidPhone(phone)) {
+      errors.phone = 'A valid phone number (7–15 digits) is required.';
+    } else {
+      data.phone = phone;
+    }
+  }
+
+  if (body.city !== undefined) {
+    data.city = sanitizeText(body.city, 120);
+  }
+
+  const rawBusiness = body.businessName ?? body.business_name;
+  if (rawBusiness !== undefined) {
+    data.businessName = sanitizeText(rawBusiness, 200);
+  }
+
+  if (Object.keys(data).length === 0 && Object.keys(errors).length === 0) {
+    errors.payload = 'At least one profile field must be provided.';
+  }
+
+  return {
+    isValid: Object.keys(errors).length === 0,
+    errors,
+    data,
+  };
+}
+
+export function validateTokenInput(body = {}) {
+  const errors = {};
+  const token = typeof body.token === 'string' ? body.token.trim() : '';
+  if (!token || token.length < 16 || token.length > 256) {
+    errors.token = 'A valid token is required.';
+  }
+  return {
+    isValid: Object.keys(errors).length === 0,
+    errors,
+    data: { token },
+  };
+}
+
+export function validateForgotPasswordInput(body = {}) {
+  const errors = {};
+  const email = normalizeEmail(body.email);
+  if (!isValidEmail(email)) {
+    errors.email = 'A valid email address is required.';
+  }
+  return {
+    isValid: Object.keys(errors).length === 0,
+    errors,
+    data: { email },
+  };
+}
+
+export function validateResetPasswordInput(body = {}) {
+  const errors = {};
+  const token = typeof body.token === 'string' ? body.token.trim() : '';
+  const password =
+    typeof (body.password ?? body.newPassword ?? body.new_password) === 'string'
+      ? body.password ?? body.newPassword ?? body.new_password
+      : '';
+  const confirmPassword =
+    typeof (body.confirmPassword ?? body.confirm_password) === 'string'
+      ? body.confirmPassword ?? body.confirm_password
+      : '';
+
+  if (!token || token.length < 16 || token.length > 256) {
+    errors.token = 'A valid password reset token is required.';
+  }
+  const strength = validateStrongPassword(password);
+  if (!strength.isValid) {
+    errors.password = strength.error;
+  }
+  if (!confirmPassword || confirmPassword !== password) {
+    errors.confirmPassword = 'Confirm password must match password.';
+  }
+
+  return {
+    isValid: Object.keys(errors).length === 0,
+    errors,
+    data: { token, password },
   };
 }
 

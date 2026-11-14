@@ -3,6 +3,7 @@ import { successResponse, errorResponse, parseJsonBody, sanitizeText } from '../
 import { validateOrderSubmission, validateOrderStatus } from '../validators/schemas.js';
 import { logAdminActivity } from '../services/auditService.js';
 import { notifyOrderCreated, notifyOrderStatusUpdated } from '../services/emailService.js';
+import { getOptionalAuthenticatedClient } from '../middleware/authMiddleware.js';
 
 export function mapOrderRow(row, { includeInternal = true } = {}) {
   if (!row) return null;
@@ -122,10 +123,11 @@ export async function createOrder(request, env) {
     return errorResponse('Order validation failed.', 400, 'VALIDATION_ERROR', validation.errors);
   }
 
+  const authClient = await getOptionalAuthenticatedClient(request, env);
   const d = validation.data;
   const now = new Date().toISOString();
 
-  // 1. Upsert Customer in customers table
+  // 1. Upsert Customer in customers table without overwriting verified client account profiles from unauthenticated guest orders
   const customer = await env.DB.prepare('SELECT id FROM customers WHERE lower(email) = lower(?)')
     .bind(d.customerEmail)
     .first();
@@ -133,11 +135,20 @@ export async function createOrder(request, env) {
   let customerId;
   if (customer) {
     customerId = customer.id;
-    await env.DB.prepare(
-      'UPDATE customers SET full_name = ?, phone = ?, city = ?, business_name = ?, updated_at = ? WHERE id = ?'
+    const linkedAccount = await env.DB.prepare(
+      'SELECT id FROM customer_accounts WHERE customer_id = ? LIMIT 1'
     )
-      .bind(d.customerName, d.customerPhone, d.customerCity, d.businessName, now, customerId)
-      .run();
+      .bind(customerId)
+      .first();
+
+    const isOwnerClient = Boolean(authClient && authClient.customerId === customerId);
+    if (!linkedAccount || isOwnerClient) {
+      await env.DB.prepare(
+        'UPDATE customers SET full_name = ?, phone = ?, city = ?, business_name = ?, updated_at = ? WHERE id = ?'
+      )
+        .bind(d.customerName, d.customerPhone, d.customerCity, d.businessName, now, customerId)
+        .run();
+    }
   } else {
     customerId = generateRandomId('cust');
     await env.DB.prepare(
