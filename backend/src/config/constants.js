@@ -43,6 +43,13 @@ export const ADMIN_INVITE_EXPIRY_SECONDS = 48 * 60 * 60; // 48 hours
 export const CLIENT_EMAIL_VERIFICATION_EXPIRY_SECONDS = 24 * 60 * 60; // 24 hours
 export const CLIENT_PASSWORD_RESET_EXPIRY_SECONDS = 60 * 60; // 1 hour
 
+export const CURRENT_TERMS_VERSION = '2026-01';
+export const CURRENT_PRIVACY_VERSION = '2026-01';
+
+export const DEFAULT_ADMIN_ACCOUNTS_PAGE = 1;
+export const DEFAULT_ADMIN_ACCOUNTS_LIMIT = 20;
+export const MAX_ADMIN_ACCOUNTS_LIMIT = 100;
+
 export const QUOTATION_ORDER_STATUSES = [
   'Quotation Sent',
   'Awaiting Customer Approval',

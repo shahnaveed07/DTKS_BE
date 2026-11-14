@@ -1,6 +1,8 @@
 import {
   CLIENT_EMAIL_VERIFICATION_EXPIRY_SECONDS,
   CLIENT_PASSWORD_RESET_EXPIRY_SECONDS,
+  CURRENT_PRIVACY_VERSION,
+  CURRENT_TERMS_VERSION,
 } from '../config/constants.js';
 import {
   generateRandomId,
@@ -34,7 +36,7 @@ import {
 function getAccessExpiresSeconds(env) {
   return (
     Number.parseInt(
-      env.JWT_ACCESS_EXPIRES_IN || env.JWT_ACCESS_EXPIRY_SECONDS || '900',
+      env?.JWT_ACCESS_EXPIRES_IN || env?.JWT_ACCESS_EXPIRY_SECONDS || '900',
       10
     ) || 900
   );
@@ -43,10 +45,30 @@ function getAccessExpiresSeconds(env) {
 function getRefreshExpiresSeconds(env) {
   return (
     Number.parseInt(
-      env.JWT_REFRESH_EXPIRES_IN || env.JWT_REFRESH_EXPIRY_SECONDS || '604800',
+      env?.JWT_REFRESH_EXPIRES_IN || env?.JWT_REFRESH_EXPIRY_SECONDS || '604800',
       10
     ) || 604800
   );
+}
+
+function getVerificationExpirySeconds(env) {
+  const configured = Number.parseInt(
+    String(env?.CLIENT_EMAIL_VERIFICATION_EXPIRY_SECONDS || ''),
+    10
+  );
+  return Number.isFinite(configured) && configured > 0
+    ? configured
+    : CLIENT_EMAIL_VERIFICATION_EXPIRY_SECONDS;
+}
+
+function getResetExpirySeconds(env) {
+  const configured = Number.parseInt(
+    String(env?.CLIENT_PASSWORD_RESET_EXPIRY_SECONDS || ''),
+    10
+  );
+  return Number.isFinite(configured) && configured > 0
+    ? configured
+    : CLIENT_PASSWORD_RESET_EXPIRY_SECONDS;
 }
 
 function mapClientResponse(row, lastLoginOverride = null) {
@@ -71,6 +93,18 @@ function mapClientResponse(row, lastLoginOverride = null) {
     isActive: Boolean(row.is_active),
     deactivated_at: row.deactivated_at || null,
     deactivatedAt: row.deactivated_at || null,
+    terms_accepted: Boolean(row.terms_accepted),
+    termsAccepted: Boolean(row.terms_accepted),
+    terms_accepted_at: row.terms_accepted_at || null,
+    termsAcceptedAt: row.terms_accepted_at || null,
+    terms_version: row.terms_version || '',
+    termsVersion: row.terms_version || '',
+    privacy_accepted: Boolean(row.privacy_accepted),
+    privacyAccepted: Boolean(row.privacy_accepted),
+    privacy_accepted_at: row.privacy_accepted_at || null,
+    privacyAcceptedAt: row.privacy_accepted_at || null,
+    privacy_version: row.privacy_version || '',
+    privacyVersion: row.privacy_version || '',
     last_login_at: lastLogin,
     lastLoginAt: lastLogin,
     created_at: row.created_at,
@@ -92,7 +126,16 @@ export async function registerClient(request, env) {
     );
   }
 
-  const { fullName, email, phone, city, businessName, password } = validation.data;
+  const {
+    fullName,
+    email,
+    phone,
+    city,
+    businessName,
+    password,
+    termsVersion: requestedTermsVersion,
+    privacyVersion: requestedPrivacyVersion,
+  } = validation.data;
 
   const existingAccount = await env.DB.prepare(
     'SELECT id FROM customer_accounts WHERE lower(email) = lower(?)'
@@ -111,38 +154,65 @@ export async function registerClient(request, env) {
   const passwordHash = await hashPassword(password);
   const now = new Date().toISOString();
   const accountId = generateRandomId('cacc');
-
-  await env.DB.prepare(
-    `INSERT INTO customer_accounts
-     (id, customer_id, full_name, email, phone, city, business_name, password_hash,
-      is_email_verified, email_verified_at, is_active, deactivated_at, token_version,
-      last_login_at, created_at, updated_at)
-     VALUES (?, NULL, ?, ?, ?, ?, ?, ?, 0, NULL, 1, NULL, 1, NULL, ?, ?)`
-  )
-    .bind(accountId, fullName, email, phone, city, businessName, passwordHash, now, now)
-    .run();
+  const termsVersion = requestedTermsVersion || env?.TERMS_VERSION || CURRENT_TERMS_VERSION;
+  const privacyVersion = requestedPrivacyVersion || env?.PRIVACY_VERSION || CURRENT_PRIVACY_VERSION;
+  const acceptedIp = getClientIp(request);
 
   const rawVerifyToken = generateRandomToken(32);
   const verifyTokenHash = await sha256Hex(rawVerifyToken);
   const tokenId = generateRandomId('ctok');
-  const expiresAt = new Date(
-    Date.now() + CLIENT_EMAIL_VERIFICATION_EXPIRY_SECONDS * 1000
-  ).toISOString();
+  const verifyExpirySeconds = getVerificationExpirySeconds(env);
+  const expiresAt = new Date(Date.now() + verifyExpirySeconds * 1000).toISOString();
 
-  await env.DB.prepare(
-    `INSERT INTO customer_auth_tokens
-     (id, customer_account_id, purpose, token_hash, expires_at, used_at, revoked_at, created_at)
-     VALUES (?, ?, 'email_verification', ?, ?, NULL, NULL, ?)`
-  )
-    .bind(tokenId, accountId, verifyTokenHash, expiresAt, now)
-    .run();
+  try {
+    await env.DB.batch([
+      env.DB.prepare(
+        `INSERT INTO customer_accounts
+         (id, customer_id, full_name, email, phone, city, business_name, password_hash,
+          is_email_verified, email_verified_at, is_active, deactivated_at, token_version,
+          terms_accepted, terms_accepted_at, terms_version,
+          privacy_accepted, privacy_accepted_at, privacy_version, legal_accepted_ip,
+          last_login_at, created_at, updated_at)
+         VALUES (?, NULL, ?, ?, ?, ?, ?, ?, 0, NULL, 1, NULL, 1, 1, ?, ?, 1, ?, ?, ?, NULL, ?, ?)`
+      ).bind(
+        accountId,
+        fullName,
+        email,
+        phone,
+        city,
+        businessName,
+        passwordHash,
+        now,
+        termsVersion,
+        now,
+        privacyVersion,
+        acceptedIp,
+        now,
+        now
+      ),
+      env.DB.prepare(
+        `INSERT INTO customer_auth_tokens
+         (id, customer_account_id, purpose, token_hash, expires_at, used_at, revoked_at, created_at)
+         VALUES (?, ?, 'email_verification', ?, ?, NULL, NULL, ?)`
+      ).bind(tokenId, accountId, verifyTokenHash, expiresAt, now),
+    ]);
+  } catch (err) {
+    if (/UNIQUE constraint failed/i.test(String(err?.message || ''))) {
+      return errorResponse(
+        'Unable to complete registration with the provided email address. If you already have an account, please sign in or reset your password.',
+        409,
+        'REGISTRATION_CONFLICT'
+      );
+    }
+    throw err;
+  }
 
   await logAdminActivity(env, {
     adminId: null,
     action: 'CLIENT_REGISTERED',
     entityType: 'CustomerAccount',
     entityId: accountId,
-    details: `New client account registered (${email}) pending email verification`,
+    details: `New client account registered (${email}) pending email verification (terms v${termsVersion}, privacy v${privacyVersion})`,
     request,
   });
 
@@ -151,12 +221,14 @@ export async function registerClient(request, env) {
     email,
     fullName,
     verificationToken: rawVerifyToken,
-    expiresHours: Math.round(CLIENT_EMAIL_VERIFICATION_EXPIRY_SECONDS / 3600),
+    expiresHours: Math.max(1, Math.round(verifyExpirySeconds / 3600)),
   });
 
   const createdRow = await env.DB.prepare(
     `SELECT id, customer_id, full_name, email, phone, city, business_name,
             is_email_verified, email_verified_at, is_active, deactivated_at,
+            terms_accepted, terms_accepted_at, terms_version,
+            privacy_accepted, privacy_accepted_at, privacy_version,
             last_login_at, created_at, updated_at
      FROM customer_accounts WHERE id = ?`
   )
@@ -171,10 +243,13 @@ export async function registerClient(request, env) {
         ? 'EMAIL_PROVIDER_UNCONFIGURED'
         : 'EMAIL_DELIVERY_FAILED',
       {
+        accountCreated: true,
         accountPendingVerification: true,
         verificationEmailSent: false,
         requiresEmailVerification: true,
+        canResendVerification: true,
         deliveryStatus: emailResult.status,
+        account: mapClientResponse(createdRow),
       }
     );
   }
@@ -215,39 +290,49 @@ export async function resendClientVerification(request, env) {
 
   if (account && account.is_active && !account.is_email_verified) {
     const now = new Date().toISOString();
-    await env.DB.prepare(
-      `UPDATE customer_auth_tokens
-       SET revoked_at = ?
-       WHERE customer_account_id = ? AND purpose = 'email_verification' AND used_at IS NULL AND revoked_at IS NULL`
-    )
-      .bind(now, account.id)
-      .run();
-
     const rawVerifyToken = generateRandomToken(32);
     const verifyTokenHash = await sha256Hex(rawVerifyToken);
-    const expiresAt = new Date(
-      Date.now() + CLIENT_EMAIL_VERIFICATION_EXPIRY_SECONDS * 1000
-    ).toISOString();
+    const verifyExpirySeconds = getVerificationExpirySeconds(env);
+    const expiresAt = new Date(Date.now() + verifyExpirySeconds * 1000).toISOString();
 
-    await env.DB.prepare(
-      `INSERT INTO customer_auth_tokens
-       (id, customer_account_id, purpose, token_hash, expires_at, used_at, revoked_at, created_at)
-       VALUES (?, ?, 'email_verification', ?, ?, NULL, NULL, ?)`
-    )
-      .bind(generateRandomId('ctok'), account.id, verifyTokenHash, expiresAt, now)
-      .run();
+    await env.DB.batch([
+      env.DB.prepare(
+        `UPDATE customer_auth_tokens
+         SET revoked_at = ?
+         WHERE customer_account_id = ? AND purpose = 'email_verification' AND used_at IS NULL AND revoked_at IS NULL`
+      ).bind(now, account.id),
+      env.DB.prepare(
+        `INSERT INTO customer_auth_tokens
+         (id, customer_account_id, purpose, token_hash, expires_at, used_at, revoked_at, created_at)
+         VALUES (?, ?, 'email_verification', ?, ?, NULL, NULL, ?)`
+      ).bind(generateRandomId('ctok'), account.id, verifyTokenHash, expiresAt, now),
+    ]);
 
-    await sendClientVerificationEmail(env, {
+    const emailResult = await sendClientVerificationEmail(env, {
       accountId: account.id,
       email: account.email,
       fullName: account.full_name,
       verificationToken: rawVerifyToken,
-      expiresHours: Math.round(CLIENT_EMAIL_VERIFICATION_EXPIRY_SECONDS / 3600),
+      expiresHours: Math.max(1, Math.round(verifyExpirySeconds / 3600)),
     });
+
+    if (!emailResult.sent) {
+      return errorResponse(
+        'Verification email could not be delivered right now. Please try again shortly.',
+        503,
+        emailResult.status === 'skipped_unconfigured'
+          ? 'EMAIL_PROVIDER_UNCONFIGURED'
+          : 'EMAIL_DELIVERY_FAILED',
+        {
+          verificationEmailSent: false,
+          deliveryStatus: emailResult.status,
+        }
+      );
+    }
   }
 
   return successResponse(
-    { requested: true },
+    { requested: true, verificationEmailSent: true },
     'If an eligible unverified account exists for that email address, a verification email has been sent.'
   );
 }
@@ -308,93 +393,116 @@ export async function verifyClientEmail(request, env) {
 
   const now = new Date().toISOString();
 
-  // Consume token immediately (single-use)
-  await env.DB.prepare('UPDATE customer_auth_tokens SET used_at = ? WHERE id = ?')
+  // Atomically claim the single-use token so concurrent requests cannot double-verify
+  const claimRes = await env.DB.prepare(
+    `UPDATE customer_auth_tokens
+     SET used_at = ?
+     WHERE id = ? AND used_at IS NULL AND revoked_at IS NULL`
+  )
     .bind(now, tokenRow.id)
     .run();
-  await env.DB.prepare(
-    `UPDATE customer_auth_tokens
-     SET revoked_at = ?
-     WHERE customer_account_id = ? AND purpose = 'email_verification' AND id != ? AND used_at IS NULL AND revoked_at IS NULL`
-  )
-    .bind(now, account.id, tokenRow.id)
-    .run();
 
-  // Safe customer record linking ONLY after verified email ownership
-  let linkedCustomerId = account.customer_id;
-  if (!linkedCustomerId) {
-    const existingCustomer = await env.DB.prepare(
-      'SELECT id FROM customers WHERE lower(email) = lower(?) LIMIT 1'
-    )
-      .bind(account.email)
-      .first();
-
-    if (existingCustomer) {
-      linkedCustomerId = existingCustomer.id;
-    } else {
-      linkedCustomerId = generateRandomId('cust');
-      await env.DB.prepare(
-        `INSERT INTO customers (id, full_name, email, phone, city, business_name, created_at, updated_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
-      )
-        .bind(
-          linkedCustomerId,
-          account.full_name,
-          account.email,
-          account.phone,
-          account.city || '',
-          account.business_name || '',
-          now,
-          now
-        )
-        .run();
-    }
-
-    // Attach any historical unlinked orders matching the verified email
-    await env.DB.prepare(
-      'UPDATE orders SET customer_id = ? WHERE customer_id IS NULL AND lower(customer_email) = lower(?)'
-    )
-      .bind(linkedCustomerId, account.email)
-      .run();
+  if (Number(claimRes?.meta?.changes || 0) !== 1) {
+    return errorResponse(
+      'This email verification token has already been used or revoked.',
+      400,
+      'VERIFICATION_TOKEN_USED'
+    );
   }
 
-  await env.DB.prepare(
-    `UPDATE customer_accounts
-     SET is_email_verified = 1,
-         email_verified_at = COALESCE(email_verified_at, ?),
-         customer_id = ?,
-         updated_at = ?
-     WHERE id = ?`
-  )
-    .bind(now, linkedCustomerId, now, account.id)
-    .run();
+  try {
+    let linkedCustomerId = account.customer_id;
+    const statements = [
+      env.DB.prepare(
+        `UPDATE customer_auth_tokens
+         SET revoked_at = ?
+         WHERE customer_account_id = ? AND purpose = 'email_verification' AND id != ? AND used_at IS NULL AND revoked_at IS NULL`
+      ).bind(now, account.id, tokenRow.id),
+    ];
 
-  const updatedAccount = await env.DB.prepare(
-    `SELECT id, customer_id, full_name, email, phone, city, business_name,
-            is_email_verified, email_verified_at, is_active, deactivated_at,
-            last_login_at, created_at, updated_at
-     FROM customer_accounts WHERE id = ?`
-  )
-    .bind(account.id)
-    .first();
+    if (!linkedCustomerId) {
+      const existingCustomer = await env.DB.prepare(
+        'SELECT id FROM customers WHERE lower(email) = lower(?) LIMIT 1'
+      )
+        .bind(account.email)
+        .first();
 
-  await logAdminActivity(env, {
-    adminId: null,
-    action: 'CLIENT_EMAIL_VERIFIED',
-    entityType: 'CustomerAccount',
-    entityId: account.id,
-    details: `Verified client email ${account.email} and linked customer record ${linkedCustomerId}`,
-    request,
-  });
+      if (existingCustomer) {
+        linkedCustomerId = existingCustomer.id;
+      } else {
+        linkedCustomerId = generateRandomId('cust');
+        statements.push(
+          env.DB.prepare(
+            `INSERT INTO customers (id, full_name, email, phone, city, business_name, created_at, updated_at)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
+          ).bind(
+            linkedCustomerId,
+            account.full_name,
+            account.email,
+            account.phone,
+            account.city || '',
+            account.business_name || '',
+            now,
+            now
+          )
+        );
+      }
 
-  return successResponse(
-    {
-      verified: true,
-      customerLinked: Boolean(linkedCustomerId),
-      account: mapClientResponse(updatedAccount),
-    },
-    'Email verified successfully. You can now sign in to your client account.'
-  );
+      statements.push(
+        env.DB.prepare(
+          'UPDATE orders SET customer_id = ? WHERE customer_id IS NULL AND lower(customer_email) = lower(?)'
+        ).bind(linkedCustomerId, account.email)
+      );
+    }
+
+    statements.push(
+      env.DB.prepare(
+        `UPDATE customer_accounts
+         SET is_email_verified = 1,
+             email_verified_at = COALESCE(email_verified_at, ?),
+             customer_id = ?,
+             updated_at = ?
+         WHERE id = ?`
+      ).bind(now, linkedCustomerId, now, account.id)
+    );
+
+    await env.DB.batch(statements);
+
+    const updatedAccount = await env.DB.prepare(
+      `SELECT id, customer_id, full_name, email, phone, city, business_name,
+              is_email_verified, email_verified_at, is_active, deactivated_at,
+              terms_accepted, terms_accepted_at, terms_version,
+              privacy_accepted, privacy_accepted_at, privacy_version,
+              last_login_at, created_at, updated_at
+       FROM customer_accounts WHERE id = ?`
+    )
+      .bind(account.id)
+      .first();
+
+    await logAdminActivity(env, {
+      adminId: null,
+      action: 'CLIENT_EMAIL_VERIFIED',
+      entityType: 'CustomerAccount',
+      entityId: account.id,
+      details: `Verified client email ${account.email} and linked customer record ${linkedCustomerId}`,
+      request,
+    });
+
+    return successResponse(
+      {
+        verified: true,
+        customerLinked: Boolean(linkedCustomerId),
+        account: mapClientResponse(updatedAccount),
+      },
+      'Email verified successfully. You can now sign in to your client account.'
+    );
+  } catch (err) {
+    await env.DB.prepare('UPDATE customer_auth_tokens SET used_at = NULL WHERE id = ?')
+      .bind(tokenRow.id)
+      .run()
+      .catch(() => {});
+    throw err;
+  }
 }
 
 export async function loginClient(request, env) {
@@ -408,7 +516,10 @@ export async function loginClient(request, env) {
   const account = await env.DB.prepare(
     `SELECT id, customer_id, full_name, email, phone, city, business_name,
             password_hash, is_email_verified, email_verified_at, is_active,
-            deactivated_at, token_version, last_login_at, created_at, updated_at
+            deactivated_at, token_version,
+            terms_accepted, terms_accepted_at, terms_version,
+            privacy_accepted, privacy_accepted_at, privacy_version,
+            last_login_at, created_at, updated_at
      FROM customer_accounts WHERE lower(email) = lower(?)`
   )
     .bind(email)
@@ -448,21 +559,6 @@ export async function loginClient(request, env) {
   }
 
   const now = new Date().toISOString();
-  if (verification.needsRehash) {
-    const upgradedHash = await hashPassword(password);
-    await env.DB.prepare(
-      'UPDATE customer_accounts SET password_hash = ?, last_login_at = ?, updated_at = ? WHERE id = ?'
-    )
-      .bind(upgradedHash, now, now, account.id)
-      .run();
-  } else {
-    await env.DB.prepare(
-      'UPDATE customer_accounts SET last_login_at = ?, updated_at = ? WHERE id = ?'
-    )
-      .bind(now, now, account.id)
-      .run();
-  }
-
   const accessExp = getAccessExpiresSeconds(env);
   const refreshExp = getRefreshExpiresSeconds(env);
   const tokenVersion = Number(account.token_version ?? 1);
@@ -485,12 +581,23 @@ export async function loginClient(request, env) {
   const sessionId = generateRandomId('csess');
   const expiresAt = new Date(Date.now() + refreshExp * 1000).toISOString();
 
-  await env.DB.prepare(
-    `INSERT INTO customer_refresh_sessions
-     (id, customer_account_id, refresh_token_hash, user_agent, ip_address, expires_at, revoked_at, created_at)
-     VALUES (?, ?, ?, ?, ?, ?, NULL, ?)`
-  )
-    .bind(
+  const updateAccountStmt = verification.needsRehash
+    ? env.DB.prepare(
+        'UPDATE customer_accounts SET password_hash = ?, last_login_at = ?, updated_at = ? WHERE id = ?'
+      ).bind(await hashPassword(password), now, now, account.id)
+    : env.DB.prepare('UPDATE customer_accounts SET last_login_at = ?, updated_at = ? WHERE id = ?').bind(
+        now,
+        now,
+        account.id
+      );
+
+  await env.DB.batch([
+    updateAccountStmt,
+    env.DB.prepare(
+      `INSERT INTO customer_refresh_sessions
+       (id, customer_account_id, refresh_token_hash, user_agent, ip_address, expires_at, revoked_at, created_at)
+       VALUES (?, ?, ?, ?, ?, ?, NULL, ?)`
+    ).bind(
       sessionId,
       account.id,
       refreshTokenHash,
@@ -498,8 +605,8 @@ export async function loginClient(request, env) {
       getClientIp(request),
       expiresAt,
       now
-    )
-    .run();
+    ),
+  ]);
 
   await logAdminActivity(env, {
     adminId: null,
@@ -563,6 +670,8 @@ export async function refreshClientToken(request, env) {
   const account = await env.DB.prepare(
     `SELECT id, customer_id, full_name, email, phone, city, business_name,
             is_email_verified, email_verified_at, is_active, deactivated_at,
+            terms_accepted, terms_accepted_at, terms_version,
+            privacy_accepted, privacy_accepted_at, privacy_version,
             token_version, last_login_at, created_at, updated_at
      FROM customer_accounts WHERE id = ?`
   )
@@ -581,9 +690,16 @@ export async function refreshClientToken(request, env) {
   }
 
   const now = new Date().toISOString();
-  await env.DB.prepare('UPDATE customer_refresh_sessions SET revoked_at = ? WHERE id = ?')
+  // Atomically claim the refresh token so concurrent refreshes cannot replay it
+  const claimSession = await env.DB.prepare(
+    'UPDATE customer_refresh_sessions SET revoked_at = ? WHERE id = ? AND revoked_at IS NULL'
+  )
     .bind(now, session.id)
     .run();
+
+  if (Number(claimSession?.meta?.changes || 0) !== 1) {
+    return errorResponse('Invalid or revoked refresh token.', 401, 'INVALID_REFRESH_TOKEN');
+  }
 
   const accessExp = getAccessExpiresSeconds(env);
   const refreshExp = getRefreshExpiresSeconds(env);
@@ -642,11 +758,29 @@ export async function refreshClientToken(request, env) {
 }
 
 export async function logoutClient(request, env, currentClient) {
-  const body = await parseJsonBody(request).catch(() => ({}));
+  const body = await parseJsonBody(request);
+  const rawAllDevices =
+    body.allDevices !== undefined ? body.allDevices : body.all_devices;
+
+  if (rawAllDevices !== undefined && typeof rawAllDevices !== 'boolean') {
+    return errorResponse('Invalid logout options.', 400, 'VALIDATION_ERROR', {
+      allDevices: 'allDevices must be a boolean.',
+    });
+  }
+
+  const allDevices = rawAllDevices === true;
   const rawToken =
     typeof (body.refreshToken || body.refresh_token) === 'string'
       ? (body.refreshToken || body.refresh_token).trim()
       : '';
+
+  if (allDevices && !currentClient?.id) {
+    return errorResponse(
+      'Authenticated session is required to log out from all devices.',
+      401,
+      'UNAUTHORIZED'
+    );
+  }
 
   if (!rawToken && !currentClient?.id) {
     return errorResponse(
@@ -657,38 +791,61 @@ export async function logoutClient(request, env, currentClient) {
   }
 
   const now = new Date().toISOString();
-  if (rawToken) {
+  let sessionsRevoked = 0;
+  let scope = 'single_device';
+
+  if (allDevices || (!rawToken && currentClient?.id)) {
+    scope = 'all_devices';
+    const [revokeRes] = await env.DB.batch([
+      env.DB.prepare(
+        'UPDATE customer_refresh_sessions SET revoked_at = ? WHERE customer_account_id = ? AND revoked_at IS NULL'
+      ).bind(now, currentClient.id),
+      env.DB.prepare(
+        'UPDATE customer_accounts SET token_version = COALESCE(token_version, 1) + 1, updated_at = ? WHERE id = ?'
+      ).bind(now, currentClient.id),
+    ]);
+    sessionsRevoked = Number(revokeRes?.meta?.changes || 0);
+  } else if (rawToken) {
     const hash = await sha256Hex(rawToken);
-    await env.DB.prepare(
-      'UPDATE customer_refresh_sessions SET revoked_at = ? WHERE refresh_token_hash = ?'
-    )
-      .bind(now, hash)
-      .run();
-  } else if (currentClient?.id) {
-    await env.DB.prepare(
-      'UPDATE customer_refresh_sessions SET revoked_at = ? WHERE customer_account_id = ?'
-    )
-      .bind(now, currentClient.id)
-      .run();
-    await env.DB.prepare(
-      'UPDATE customer_accounts SET token_version = COALESCE(token_version, 1) + 1, updated_at = ? WHERE id = ?'
-    )
-      .bind(now, currentClient.id)
-      .run();
+    const revokeRes = currentClient?.id
+      ? await env.DB.prepare(
+          'UPDATE customer_refresh_sessions SET revoked_at = ? WHERE refresh_token_hash = ? AND customer_account_id = ? AND revoked_at IS NULL'
+        )
+          .bind(now, hash, currentClient.id)
+          .run()
+      : await env.DB.prepare(
+          'UPDATE customer_refresh_sessions SET revoked_at = ? WHERE refresh_token_hash = ? AND revoked_at IS NULL'
+        )
+          .bind(now, hash)
+          .run();
+    sessionsRevoked = Number(revokeRes?.meta?.changes || 0);
   }
 
   if (currentClient?.id) {
     await logAdminActivity(env, {
       adminId: null,
-      action: 'CLIENT_LOGOUT',
+      action: scope === 'all_devices' ? 'CLIENT_LOGOUT_ALL_DEVICES' : 'CLIENT_LOGOUT',
       entityType: 'CustomerAccount',
       entityId: currentClient.id,
-      details: 'Client signed out',
+      details:
+        scope === 'all_devices'
+          ? 'Client signed out from all devices and invalidated active access tokens'
+          : 'Client signed out from current session',
       request,
     });
   }
 
-  return successResponse({ loggedOut: true }, 'Logged out successfully.');
+  return successResponse(
+    {
+      loggedOut: true,
+      allDevices: scope === 'all_devices',
+      scope,
+      sessionsRevoked,
+    },
+    scope === 'all_devices'
+      ? 'Logged out from all devices successfully.'
+      : 'Logged out successfully.'
+  );
 }
 
 export async function getAuthenticatedClient(request, env, client) {
@@ -717,27 +874,31 @@ export async function updateClientProfile(request, env, client) {
       : client.businessName;
 
   const now = new Date().toISOString();
-  await env.DB.prepare(
-    `UPDATE customer_accounts
-     SET full_name = ?, phone = ?, city = ?, business_name = ?, updated_at = ?
-     WHERE id = ?`
-  )
-    .bind(nextFullName, nextPhone, nextCity, nextBusinessName, now, client.id)
-    .run();
-
-  if (client.customerId) {
-    await env.DB.prepare(
-      `UPDATE customers
+  const statements = [
+    env.DB.prepare(
+      `UPDATE customer_accounts
        SET full_name = ?, phone = ?, city = ?, business_name = ?, updated_at = ?
        WHERE id = ?`
-    )
-      .bind(nextFullName, nextPhone, nextCity, nextBusinessName, now, client.customerId)
-      .run();
+    ).bind(nextFullName, nextPhone, nextCity, nextBusinessName, now, client.id),
+  ];
+
+  if (client.customerId) {
+    statements.push(
+      env.DB.prepare(
+        `UPDATE customers
+         SET full_name = ?, phone = ?, city = ?, business_name = ?, updated_at = ?
+         WHERE id = ?`
+      ).bind(nextFullName, nextPhone, nextCity, nextBusinessName, now, client.customerId)
+    );
   }
+
+  await env.DB.batch(statements);
 
   const updatedRow = await env.DB.prepare(
     `SELECT id, customer_id, full_name, email, phone, city, business_name,
             is_email_verified, email_verified_at, is_active, deactivated_at,
+            terms_accepted, terms_accepted_at, terms_version,
+            privacy_accepted, privacy_accepted_at, privacy_version,
             last_login_at, created_at, updated_at
      FROM customer_accounts WHERE id = ?`
   )
@@ -786,19 +947,16 @@ export async function changeClientPassword(request, env, client) {
   const newHash = await hashPassword(newPassword);
   const now = new Date().toISOString();
 
-  await env.DB.prepare(
-    `UPDATE customer_accounts
-     SET password_hash = ?, token_version = COALESCE(token_version, 1) + 1, updated_at = ?
-     WHERE id = ?`
-  )
-    .bind(newHash, now, client.id)
-    .run();
-
-  await env.DB.prepare(
-    'UPDATE customer_refresh_sessions SET revoked_at = ? WHERE customer_account_id = ?'
-  )
-    .bind(now, client.id)
-    .run();
+  await env.DB.batch([
+    env.DB.prepare(
+      `UPDATE customer_accounts
+       SET password_hash = ?, token_version = COALESCE(token_version, 1) + 1, updated_at = ?
+       WHERE id = ?`
+    ).bind(newHash, now, client.id),
+    env.DB.prepare(
+      'UPDATE customer_refresh_sessions SET revoked_at = ? WHERE customer_account_id = ? AND revoked_at IS NULL'
+    ).bind(now, client.id),
+  ]);
 
   await logAdminActivity(env, {
     adminId: null,
@@ -846,34 +1004,30 @@ export async function forgotClientPassword(request, env) {
 
   if (account && account.is_active && account.is_email_verified) {
     const now = new Date().toISOString();
-    await env.DB.prepare(
-      `UPDATE customer_auth_tokens
-       SET revoked_at = ?
-       WHERE customer_account_id = ? AND purpose = 'password_reset' AND used_at IS NULL AND revoked_at IS NULL`
-    )
-      .bind(now, account.id)
-      .run();
-
     const rawResetToken = generateRandomToken(32);
     const resetTokenHash = await sha256Hex(rawResetToken);
-    const expiresAt = new Date(
-      Date.now() + CLIENT_PASSWORD_RESET_EXPIRY_SECONDS * 1000
-    ).toISOString();
+    const resetExpirySeconds = getResetExpirySeconds(env);
+    const expiresAt = new Date(Date.now() + resetExpirySeconds * 1000).toISOString();
 
-    await env.DB.prepare(
-      `INSERT INTO customer_auth_tokens
-       (id, customer_account_id, purpose, token_hash, expires_at, used_at, revoked_at, created_at)
-       VALUES (?, ?, 'password_reset', ?, ?, NULL, NULL, ?)`
-    )
-      .bind(generateRandomId('ctok'), account.id, resetTokenHash, expiresAt, now)
-      .run();
+    await env.DB.batch([
+      env.DB.prepare(
+        `UPDATE customer_auth_tokens
+         SET revoked_at = ?
+         WHERE customer_account_id = ? AND purpose = 'password_reset' AND used_at IS NULL AND revoked_at IS NULL`
+      ).bind(now, account.id),
+      env.DB.prepare(
+        `INSERT INTO customer_auth_tokens
+         (id, customer_account_id, purpose, token_hash, expires_at, used_at, revoked_at, created_at)
+         VALUES (?, ?, 'password_reset', ?, ?, NULL, NULL, ?)`
+      ).bind(generateRandomId('ctok'), account.id, resetTokenHash, expiresAt, now),
+    ]);
 
-    await sendClientPasswordResetEmail(env, {
+    const emailResult = await sendClientPasswordResetEmail(env, {
       accountId: account.id,
       email: account.email,
       fullName: account.full_name,
       resetToken: rawResetToken,
-      expiresMinutes: Math.round(CLIENT_PASSWORD_RESET_EXPIRY_SECONDS / 60),
+      expiresMinutes: Math.max(1, Math.round(resetExpirySeconds / 60)),
     });
 
     await logAdminActivity(env, {
@@ -884,6 +1038,20 @@ export async function forgotClientPassword(request, env) {
       details: `Password reset requested for ${account.email}`,
       request,
     });
+
+    if (!emailResult.sent) {
+      return errorResponse(
+        'Password reset email could not be delivered right now. Please try again shortly.',
+        503,
+        emailResult.status === 'skipped_unconfigured'
+          ? 'EMAIL_PROVIDER_UNCONFIGURED'
+          : 'EMAIL_DELIVERY_FAILED',
+        {
+          resetEmailSent: false,
+          deliveryStatus: emailResult.status,
+        }
+      );
+    }
   }
 
   return successResponse(
@@ -933,42 +1101,68 @@ export async function resetClientPassword(request, env) {
   }
 
   const account = await env.DB.prepare(
-    'SELECT id, full_name, email, is_active FROM customer_accounts WHERE id = ?'
+    'SELECT id, full_name, email, is_active, is_email_verified FROM customer_accounts WHERE id = ?'
   )
     .bind(tokenRow.customer_account_id)
     .first();
 
-  if (!account || !account.is_active) {
+  if (!account) {
+    return errorResponse('Client account not found.', 404, 'CLIENT_NOT_FOUND');
+  }
+  if (!account.is_active) {
     return errorResponse('Client account is not active.', 403, 'ACCOUNT_DEACTIVATED');
+  }
+  if (!account.is_email_verified) {
+    return errorResponse(
+      'Please verify your email address before resetting your password.',
+      403,
+      'EMAIL_NOT_VERIFIED'
+    );
   }
 
   const newHash = await hashPassword(password);
   const now = new Date().toISOString();
 
-  await env.DB.prepare('UPDATE customer_auth_tokens SET used_at = ? WHERE id = ?')
+  // Atomically claim the reset token so concurrent requests cannot double-reset
+  const claimRes = await env.DB.prepare(
+    `UPDATE customer_auth_tokens
+     SET used_at = ?
+     WHERE id = ? AND used_at IS NULL AND revoked_at IS NULL`
+  )
     .bind(now, tokenRow.id)
     .run();
-  await env.DB.prepare(
-    `UPDATE customer_auth_tokens
-     SET revoked_at = ?
-     WHERE customer_account_id = ? AND purpose = 'password_reset' AND id != ? AND used_at IS NULL AND revoked_at IS NULL`
-  )
-    .bind(now, account.id, tokenRow.id)
-    .run();
 
-  await env.DB.prepare(
-    `UPDATE customer_accounts
-     SET password_hash = ?, token_version = COALESCE(token_version, 1) + 1, updated_at = ?
-     WHERE id = ?`
-  )
-    .bind(newHash, now, account.id)
-    .run();
+  if (Number(claimRes?.meta?.changes || 0) !== 1) {
+    return errorResponse(
+      'This password reset token has already been used or revoked.',
+      400,
+      'RESET_TOKEN_USED'
+    );
+  }
 
-  await env.DB.prepare(
-    'UPDATE customer_refresh_sessions SET revoked_at = ? WHERE customer_account_id = ?'
-  )
-    .bind(now, account.id)
-    .run();
+  try {
+    await env.DB.batch([
+      env.DB.prepare(
+        `UPDATE customer_auth_tokens
+         SET revoked_at = ?
+         WHERE customer_account_id = ? AND purpose = 'password_reset' AND id != ? AND used_at IS NULL AND revoked_at IS NULL`
+      ).bind(now, account.id, tokenRow.id),
+      env.DB.prepare(
+        `UPDATE customer_accounts
+         SET password_hash = ?, token_version = COALESCE(token_version, 1) + 1, updated_at = ?
+         WHERE id = ?`
+      ).bind(newHash, now, account.id),
+      env.DB.prepare(
+        'UPDATE customer_refresh_sessions SET revoked_at = ? WHERE customer_account_id = ? AND revoked_at IS NULL'
+      ).bind(now, account.id),
+    ]);
+  } catch (err) {
+    await env.DB.prepare('UPDATE customer_auth_tokens SET used_at = NULL WHERE id = ?')
+      .bind(tokenRow.id)
+      .run()
+      .catch(() => {});
+    throw err;
+  }
 
   await logAdminActivity(env, {
     adminId: null,
@@ -1026,19 +1220,16 @@ export async function deactivateClientAccount(request, env, client) {
   }
 
   const now = new Date().toISOString();
-  await env.DB.prepare(
-    `UPDATE customer_accounts
-     SET is_active = 0, deactivated_at = ?, token_version = COALESCE(token_version, 1) + 1, updated_at = ?
-     WHERE id = ?`
-  )
-    .bind(now, now, client.id)
-    .run();
-
-  await env.DB.prepare(
-    'UPDATE customer_refresh_sessions SET revoked_at = ? WHERE customer_account_id = ?'
-  )
-    .bind(now, client.id)
-    .run();
+  await env.DB.batch([
+    env.DB.prepare(
+      `UPDATE customer_accounts
+       SET is_active = 0, deactivated_at = ?, token_version = COALESCE(token_version, 1) + 1, updated_at = ?
+       WHERE id = ?`
+    ).bind(now, now, client.id),
+    env.DB.prepare(
+      'UPDATE customer_refresh_sessions SET revoked_at = ? WHERE customer_account_id = ? AND revoked_at IS NULL'
+    ).bind(now, client.id),
+  ]);
 
   await logAdminActivity(env, {
     adminId: null,

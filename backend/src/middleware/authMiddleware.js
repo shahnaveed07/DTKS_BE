@@ -300,6 +300,8 @@ export async function authenticateClient(
   const accountRow = await env.DB.prepare(
     `SELECT id, customer_id, full_name, email, phone, city, business_name,
             is_email_verified, email_verified_at, is_active, deactivated_at,
+            terms_accepted, terms_accepted_at, terms_version,
+            privacy_accepted, privacy_accepted_at, privacy_version,
             token_version, last_login_at, created_at, updated_at
      FROM customer_accounts WHERE id = ?`
   )
@@ -368,6 +370,18 @@ export async function authenticateClient(
       isActive: Boolean(accountRow.is_active),
       deactivated_at: accountRow.deactivated_at || null,
       deactivatedAt: accountRow.deactivated_at || null,
+      terms_accepted: Boolean(accountRow.terms_accepted),
+      termsAccepted: Boolean(accountRow.terms_accepted),
+      terms_accepted_at: accountRow.terms_accepted_at || null,
+      termsAcceptedAt: accountRow.terms_accepted_at || null,
+      terms_version: accountRow.terms_version || '',
+      termsVersion: accountRow.terms_version || '',
+      privacy_accepted: Boolean(accountRow.privacy_accepted),
+      privacyAccepted: Boolean(accountRow.privacy_accepted),
+      privacy_accepted_at: accountRow.privacy_accepted_at || null,
+      privacyAcceptedAt: accountRow.privacy_accepted_at || null,
+      privacy_version: accountRow.privacy_version || '',
+      privacyVersion: accountRow.privacy_version || '',
       last_login_at: accountRow.last_login_at || null,
       lastLoginAt: accountRow.last_login_at || null,
       created_at: accountRow.created_at,

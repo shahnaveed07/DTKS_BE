@@ -196,11 +196,29 @@ export async function loginAdmin(request, env) {
 }
 
 export async function logoutAdmin(request, env, currentAdmin) {
-  const body = await parseJsonBody(request).catch(() => ({}));
+  const body = await parseJsonBody(request);
+  const rawAllDevices =
+    body.allDevices !== undefined ? body.allDevices : body.all_devices;
+
+  if (rawAllDevices !== undefined && typeof rawAllDevices !== 'boolean') {
+    return errorResponse('Invalid logout options.', 400, 'VALIDATION_ERROR', {
+      allDevices: 'allDevices must be a boolean.',
+    });
+  }
+
+  const allDevices = rawAllDevices === true;
   const rawToken =
     typeof (body.refreshToken || body.refresh_token) === 'string'
       ? (body.refreshToken || body.refresh_token).trim()
       : '';
+
+  if (allDevices && !currentAdmin?.id) {
+    return errorResponse(
+      'Authenticated session is required to log out from all devices.',
+      401,
+      'UNAUTHORIZED'
+    );
+  }
 
   if (!rawToken && !currentAdmin?.id) {
     return errorResponse(
@@ -211,37 +229,61 @@ export async function logoutAdmin(request, env, currentAdmin) {
   }
 
   const now = new Date().toISOString();
+  let sessionsRevoked = 0;
+  let scope = 'single_device';
 
-  if (rawToken) {
+  if (allDevices || (!rawToken && currentAdmin?.id)) {
+    scope = 'all_devices';
+    const [revokeRes] = await env.DB.batch([
+      env.DB.prepare(
+        'UPDATE refresh_sessions SET revoked_at = ? WHERE admin_id = ? AND revoked_at IS NULL'
+      ).bind(now, currentAdmin.id),
+      env.DB.prepare(
+        'UPDATE admins SET token_version = COALESCE(token_version, 1) + 1, updated_at = ? WHERE id = ?'
+      ).bind(now, currentAdmin.id),
+    ]);
+    sessionsRevoked = Number(revokeRes?.meta?.changes || 0);
+  } else if (rawToken) {
     const hash = await sha256Hex(rawToken);
-    await env.DB.prepare(
-      'UPDATE refresh_sessions SET revoked_at = ? WHERE refresh_token_hash = ?'
-    )
-      .bind(now, hash)
-      .run();
-  } else if (currentAdmin?.id) {
-    await env.DB.prepare('UPDATE refresh_sessions SET revoked_at = ? WHERE admin_id = ?')
-      .bind(now, currentAdmin.id)
-      .run();
-    await env.DB.prepare(
-      'UPDATE admins SET token_version = COALESCE(token_version, 1) + 1, updated_at = ? WHERE id = ?'
-    )
-      .bind(now, currentAdmin.id)
-      .run();
+    const revokeRes = currentAdmin?.id
+      ? await env.DB.prepare(
+          'UPDATE refresh_sessions SET revoked_at = ? WHERE refresh_token_hash = ? AND admin_id = ? AND revoked_at IS NULL'
+        )
+          .bind(now, hash, currentAdmin.id)
+          .run()
+      : await env.DB.prepare(
+          'UPDATE refresh_sessions SET revoked_at = ? WHERE refresh_token_hash = ? AND revoked_at IS NULL'
+        )
+          .bind(now, hash)
+          .run();
+    sessionsRevoked = Number(revokeRes?.meta?.changes || 0);
   }
 
   if (currentAdmin?.id) {
     await logAdminActivity(env, {
       adminId: currentAdmin.id,
-      action: 'LOGOUT',
+      action: scope === 'all_devices' ? 'LOGOUT_ALL_DEVICES' : 'LOGOUT',
       entityType: 'Admin',
       entityId: currentAdmin.id,
-      details: 'Administrator signed out',
+      details:
+        scope === 'all_devices'
+          ? 'Administrator signed out from all devices'
+          : 'Administrator signed out',
       request,
     });
   }
 
-  return successResponse({ loggedOut: true }, 'Logged out successfully.');
+  return successResponse(
+    {
+      loggedOut: true,
+      allDevices: scope === 'all_devices',
+      scope,
+      sessionsRevoked,
+    },
+    scope === 'all_devices'
+      ? 'Logged out from all devices successfully.'
+      : 'Logged out successfully.'
+  );
 }
 
 export async function refreshAdminToken(request, env) {
@@ -288,11 +330,17 @@ export async function refreshAdminToken(request, env) {
     return errorResponse('Administrator account is not active.', 403, 'ACCOUNT_DEACTIVATED');
   }
 
-  // Rotate refresh token: revoke old session and issue a new one
+  // Rotate refresh token atomically: claim old session so concurrent replays fail
   const now = new Date().toISOString();
-  await env.DB.prepare('UPDATE refresh_sessions SET revoked_at = ? WHERE id = ?')
+  const claimSession = await env.DB.prepare(
+    'UPDATE refresh_sessions SET revoked_at = ? WHERE id = ? AND revoked_at IS NULL'
+  )
     .bind(now, session.id)
     .run();
+
+  if (Number(claimSession?.meta?.changes || 0) !== 1) {
+    return errorResponse('Invalid or revoked refresh token.', 401, 'INVALID_REFRESH_TOKEN');
+  }
 
   const accessExp = getAccessExpiresSeconds(env);
   const refreshExp = getRefreshExpiresSeconds(env);
@@ -381,16 +429,14 @@ export async function changeAdminPassword(request, env, admin) {
   const newHash = await hashPassword(newPassword);
   const now = new Date().toISOString();
 
-  await env.DB.prepare(
-    'UPDATE admins SET password_hash = ?, token_version = COALESCE(token_version, 1) + 1, updated_at = ? WHERE id = ?'
-  )
-    .bind(newHash, now, admin.id)
-    .run();
-
-  // Revoke existing refresh sessions on password change
-  await env.DB.prepare('UPDATE refresh_sessions SET revoked_at = ? WHERE admin_id = ?')
-    .bind(now, admin.id)
-    .run();
+  await env.DB.batch([
+    env.DB.prepare(
+      'UPDATE admins SET password_hash = ?, token_version = COALESCE(token_version, 1) + 1, updated_at = ? WHERE id = ?'
+    ).bind(newHash, now, admin.id),
+    env.DB.prepare(
+      'UPDATE refresh_sessions SET revoked_at = ? WHERE admin_id = ? AND revoked_at IS NULL'
+    ).bind(now, admin.id),
+  ]);
 
   await logAdminActivity(env, {
     adminId: admin.id,

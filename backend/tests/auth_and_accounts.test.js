@@ -491,6 +491,7 @@ describe('DTKS Admin Account Management & Client Auth Test Suite (/api/v1)', () 
         phone: '+91 99061 55501',
         password: 'Client#2026!Strong',
         confirmPassword: 'Client#2026!Strong',
+        acceptTerms: true,
       },
     });
     assert.equal(invalidEmailReg.status, 400);
@@ -504,6 +505,7 @@ describe('DTKS Admin Account Management & Client Auth Test Suite (/api/v1)', () 
         phone: '+91 99061 55501',
         password: 'password123',
         confirmPassword: 'password123',
+        acceptTerms: true,
       },
     });
     assert.equal(weakPwReg.status, 400);
@@ -517,6 +519,7 @@ describe('DTKS Admin Account Management & Client Auth Test Suite (/api/v1)', () 
         phone: '+91 99061 55501',
         password: 'Client#2026!Strong',
         confirmPassword: 'Different#2026!Strong',
+        acceptTerms: true,
       },
     });
     assert.equal(mismatchPwReg.status, 400);
@@ -532,14 +535,17 @@ describe('DTKS Admin Account Management & Client Auth Test Suite (/api/v1)', () 
         phone: '+91 99061 55599',
         password: 'Client#2026!Strong',
         confirmPassword: 'Client#2026!Strong',
+        acceptTerms: true,
       },
     });
     assert.equal(unconfiguredRes.status, 503);
     assert.equal(unconfiguredRes.json.error.code, 'EMAIL_PROVIDER_UNCONFIGURED');
+    assert.equal(unconfiguredRes.json.error.details.accountCreated, true);
     assert.equal(unconfiguredRes.json.error.details.accountPendingVerification, true);
     assert.equal(unconfiguredRes.json.error.details.verificationEmailSent, false);
+    assert.equal(unconfiguredRes.json.error.details.canResendVerification, true);
 
-    // 4. Successful registration with case-insensitive email normalization
+    // 4. Successful registration with case-insensitive email normalization & legal acceptance
     const regRes = await apiRequest('/api/v1/client/auth/register', {
       method: 'POST',
       ip: '10.2.0.5',
@@ -551,12 +557,17 @@ describe('DTKS Admin Account Management & Client Auth Test Suite (/api/v1)', () 
         businessName: 'Heritage Crafts',
         password: 'ClientA#2026!Strong',
         confirmPassword: 'ClientA#2026!Strong',
+        acceptTerms: true,
       },
     });
     assert.equal(regRes.status, 201);
     assert.equal(regRes.json.data.verificationEmailSent, true);
     assert.equal(regRes.json.data.account.email, 'clienta@dtks-test.studio');
     assert.equal(regRes.json.data.account.isEmailVerified, false);
+    assert.equal(regRes.json.data.account.termsAccepted, true);
+    assert.ok(regRes.json.data.account.termsAcceptedAt);
+    assert.equal(regRes.json.data.account.termsVersion, '2026-01');
+    assert.equal(regRes.json.data.account.privacyAccepted, true);
     assert.equal(regRes.json.data.account.customerId, null, 'Must not link customer before email verification');
 
     // Duplicate registration rejected
@@ -569,6 +580,7 @@ describe('DTKS Admin Account Management & Client Auth Test Suite (/api/v1)', () 
         phone: '+91 99061 55501',
         password: 'ClientA#2026!Strong',
         confirmPassword: 'ClientA#2026!Strong',
+        acceptTerms: true,
       },
     });
     assert.equal(dupRegRes.status, 409);
@@ -718,6 +730,7 @@ describe('DTKS Admin Account Management & Client Auth Test Suite (/api/v1)', () 
         phone: '+91 99061 77702',
         password: 'ClientB#2026!Strong',
         confirmPassword: 'ClientB#2026!Strong',
+        acceptTerms: true,
       },
     });
     assert.equal(regB.status, 201);
@@ -936,4 +949,501 @@ describe('DTKS Admin Account Management & Client Auth Test Suite (/api/v1)', () 
     assert.ok(!serializedLogs.includes(rawResetToken));
     assert.ok(!serializedLogs.includes(newClientAPassword));
   });
+
+  it('A6. Admin Account Listing Filtering, Search, Legacy Compatibility & Pagination Normalization', async () => {
+    // Filter by status=active vs status=inactive vs status=all
+    const activeRes = await apiRequest('/api/v1/admin/accounts?status=active', { token: superToken });
+    assert.equal(activeRes.status, 200);
+    assert.ok(activeRes.json.data.accounts.every((a) => a.isActive === true));
+    assert.equal(
+      activeRes.json.data.pagination.total,
+      activeRes.json.data.accounts.length
+    );
+
+    const inactiveRes = await apiRequest('/api/v1/admin/accounts?status=inactive', {
+      token: superToken,
+    });
+    assert.equal(inactiveRes.status, 200);
+    assert.ok(inactiveRes.json.data.accounts.length >= 2);
+    assert.ok(inactiveRes.json.data.accounts.every((a) => a.isActive === false));
+
+    // Legacy isActive / is_active compatibility
+    const legacyInactive = await apiRequest('/api/v1/admin/accounts?isActive=false', {
+      token: superToken,
+    });
+    assert.equal(legacyInactive.status, 200);
+    assert.equal(legacyInactive.json.data.pagination.total, inactiveRes.json.data.pagination.total);
+
+    // Search + role combination
+    const roleSearchRes = await apiRequest(
+      '/api/v1/admin/accounts?role=editor&search=editor&status=all',
+      { token: superToken }
+    );
+    assert.equal(roleSearchRes.status, 200);
+    assert.equal(roleSearchRes.json.data.pagination.total, 1);
+    assert.equal(roleSearchRes.json.data.accounts[0].email, 'editor@dtks-test.studio');
+
+    // Invalid page & limit normalization
+    const normalizedRes = await apiRequest('/api/v1/admin/accounts?page=-5&limit=abc', {
+      token: superToken,
+    });
+    assert.equal(normalizedRes.status, 200);
+    assert.equal(normalizedRes.json.data.pagination.page, 1);
+    assert.equal(normalizedRes.json.data.pagination.limit, 20);
+
+    // Multi-page pagination totals match filtered counts
+    const page1 = await apiRequest('/api/v1/admin/accounts?status=all&page=1&limit=2', {
+      token: superToken,
+    });
+    const page2 = await apiRequest('/api/v1/admin/accounts?status=all&page=2&limit=2', {
+      token: superToken,
+    });
+    assert.equal(page1.status, 200);
+    assert.equal(page2.status, 200);
+    assert.equal(page1.json.data.accounts.length, 2);
+    assert.ok(page1.json.data.pagination.total >= 4);
+    assert.equal(page1.json.data.pagination.hasNextPage, true);
+    assert.equal(page1.json.data.pagination.hasPrevPage, false);
+    assert.equal(page2.json.data.pagination.hasPrevPage, true);
+    assert.notEqual(page1.json.data.accounts[0].id, page2.json.data.accounts[0].id);
+  });
+
+  it('A7. Concurrent Invite Acceptance, Deactivated Pending Account, Admin Change Password & Multi-Device Logout', async () => {
+    // 1. Custom invite expiry via env override & missing confirmPassword validation
+    const createCustomExpiry = await apiRequest('/api/v1/admin/accounts', {
+      method: 'POST',
+      token: superToken,
+      customEnv: { ...env, ADMIN_INVITE_EXPIRY_SECONDS: '7200' },
+      body: {
+        name: 'Concurrent Invite Admin',
+        email: 'concurrent.admin@dtks-test.studio',
+        role: 'admin',
+      },
+    });
+    assert.equal(createCustomExpiry.status, 201);
+    const expiresDeltaMs =
+      new Date(createCustomExpiry.json.data.invitationExpiresAt).getTime() - Date.now();
+    assert.ok(expiresDeltaMs > 3600 * 1000 && expiresDeltaMs <= 7200 * 1000 + 5000);
+
+    const raceToken = extractTokenFromLatestEmail('concurrent.admin@dtks-test.studio');
+
+    // Missing confirmPassword produces distinct validation error
+    const missingConfirm = await apiRequest('/api/v1/auth/accept-invite', {
+      method: 'POST',
+      body: { token: raceToken, password: 'RaceAdmin#2026!Strong' },
+    });
+    assert.equal(missingConfirm.status, 400);
+    assert.equal(missingConfirm.json.error.details.confirmPassword, 'Password confirmation is required.');
+
+    // Concurrent invite acceptance: strictly one succeeds, one fails with INVITE_TOKEN_ALREADY_USED
+    const [raceA, raceB] = await Promise.all([
+      apiRequest('/api/v1/auth/accept-invite', {
+        method: 'POST',
+        body: {
+          token: raceToken,
+          password: 'RaceAdmin#2026!Strong',
+          confirmPassword: 'RaceAdmin#2026!Strong',
+        },
+      }),
+      apiRequest('/api/v1/auth/accept-invite', {
+        method: 'POST',
+        body: {
+          token: raceToken,
+          password: 'RaceAdmin#2026!Strong',
+          confirmPassword: 'RaceAdmin#2026!Strong',
+        },
+      }),
+    ]);
+    const raceStatuses = [raceA.status, raceB.status].sort();
+    assert.deepEqual(raceStatuses, [200, 400]);
+
+    // 2. Deactivated pending admin cannot resend or accept invite
+    const pendingDeactCreate = await apiRequest('/api/v1/admin/accounts', {
+      method: 'POST',
+      token: superToken,
+      body: {
+        name: 'Deactivated Pending',
+        email: 'deactivated.pending@dtks-test.studio',
+        role: 'editor',
+      },
+    });
+    assert.equal(pendingDeactCreate.status, 201);
+    const pendingDeactId = pendingDeactCreate.json.data.account.id;
+    const pendingDeactToken = extractTokenFromLatestEmail('deactivated.pending@dtks-test.studio');
+
+    const deactPendingRes = await apiRequest(`/api/v1/admin/accounts/${pendingDeactId}/status`, {
+      method: 'PATCH',
+      token: superToken,
+      body: { isActive: false },
+    });
+    assert.equal(deactPendingRes.status, 200);
+
+    const resendDeact = await apiRequest(`/api/v1/admin/accounts/${pendingDeactId}/resend-invite`, {
+      method: 'POST',
+      token: superToken,
+    });
+    assert.equal(resendDeact.status, 403);
+    assert.equal(resendDeact.json.error.code, 'ACCOUNT_DEACTIVATED');
+
+    const acceptDeact = await apiRequest('/api/v1/auth/accept-invite', {
+      method: 'POST',
+      body: {
+        token: pendingDeactToken,
+        password: 'DeactAdmin#2026!Strong',
+        confirmPassword: 'DeactAdmin#2026!Strong',
+      },
+    });
+    assert.equal(acceptDeact.status, 403);
+    assert.equal(acceptDeact.json.error.code, 'ACCOUNT_DEACTIVATED');
+
+    // 3. Admin single-device vs allDevices logout + change-password session invalidation
+    const dev1Login = await apiRequest('/api/v1/auth/login', {
+      method: 'POST',
+      ip: '10.3.0.1',
+      body: { email: 'concurrent.admin@dtks-test.studio', password: 'RaceAdmin#2026!Strong' },
+    });
+    const dev2Login = await apiRequest('/api/v1/auth/login', {
+      method: 'POST',
+      ip: '10.3.0.2',
+      body: { email: 'concurrent.admin@dtks-test.studio', password: 'RaceAdmin#2026!Strong' },
+    });
+    assert.equal(dev1Login.status, 200);
+    assert.equal(dev2Login.status, 200);
+
+    // Single-device logout revokes only dev1 refresh token, leaving dev2 working
+    const singleLogout = await apiRequest('/api/v1/auth/logout', {
+      method: 'POST',
+      token: dev1Login.json.data.accessToken,
+      body: { refreshToken: dev1Login.json.data.refreshToken },
+    });
+    assert.equal(singleLogout.status, 200);
+    assert.equal(singleLogout.json.data.allDevices, false);
+    assert.equal(singleLogout.json.data.scope, 'single_device');
+
+    const dev1RefreshAfter = await apiRequest('/api/v1/auth/refresh', {
+      method: 'POST',
+      body: { refreshToken: dev1Login.json.data.refreshToken },
+    });
+    assert.equal(dev1RefreshAfter.status, 401);
+
+    const dev2MeStillWorks = await apiRequest('/api/v1/auth/me', {
+      token: dev2Login.json.data.accessToken,
+    });
+    assert.equal(dev2MeStillWorks.status, 200);
+
+    // Change password invalidates dev2 access & refresh tokens
+    const changeAdminPw = await apiRequest('/api/v1/auth/change-password', {
+      method: 'POST',
+      token: dev2Login.json.data.accessToken,
+      body: {
+        currentPassword: 'RaceAdmin#2026!Strong',
+        newPassword: 'RaceAdmin#2026!Changed',
+        confirmPassword: 'RaceAdmin#2026!Changed',
+      },
+    });
+    assert.equal(changeAdminPw.status, 200);
+
+    const dev2MeAfterPwChange = await apiRequest('/api/v1/auth/me', {
+      token: dev2Login.json.data.accessToken,
+    });
+    assert.equal(dev2MeAfterPwChange.status, 401);
+    assert.equal(dev2MeAfterPwChange.json.error.code, 'SESSION_REVOKED');
+
+    const dev2RefreshAfterPwChange = await apiRequest('/api/v1/auth/refresh', {
+      method: 'POST',
+      body: { refreshToken: dev2Login.json.data.refreshToken },
+    });
+    assert.equal(dev2RefreshAfterPwChange.status, 401);
+  });
+
+  it('B2. Client Legal Acceptance Enforcement, Email Failure Propagation & Malformed JSON Handling', async () => {
+    // Missing acceptTerms, false acceptTerms, and string 'false' must all fail validation
+    for (const badTermsPayload of [
+      {},
+      { acceptTerms: false },
+      { acceptTerms: 'false' },
+      { acceptTerms: true, acceptPrivacy: false },
+    ]) {
+      const res = await apiRequest('/api/v1/client/auth/register', {
+        method: 'POST',
+        ip: '10.4.0.1',
+        body: {
+          fullName: 'Legal Reject User',
+          email: 'legal-reject@dtks-test.studio',
+          phone: '+91 99061 88801',
+          password: 'Client#2026!Strong',
+          confirmPassword: 'Client#2026!Strong',
+          ...badTermsPayload,
+        },
+      });
+      assert.equal(res.status, 400);
+      assert.equal(res.json.error.code, 'VALIDATION_ERROR');
+    }
+
+    // Malformed JSON body returns structured 400 MALFORMED_JSON
+    const malformedRes = await apiRequest('/api/v1/client/auth/register', {
+      method: 'POST',
+      ip: '10.4.0.2',
+      headers: { 'Content-Type': 'application/json' },
+      body: '{"fullName": "Broken JSON',
+    });
+    assert.equal(malformedRes.status, 400);
+    assert.equal(malformedRes.json.error.code, 'MALFORMED_JSON');
+
+    // Valid client registration persists legal acceptance columns in D1
+    const regClientC = await apiRequest('/api/v1/client/auth/register', {
+      method: 'POST',
+      ip: '10.4.0.3',
+      body: {
+        fullName: 'Tariq Lone',
+        email: 'clientc@dtks-test.studio',
+        phone: '+91 99061 88803',
+        password: 'ClientC#2026!Strong',
+        confirmPassword: 'ClientC#2026!Strong',
+        acceptTerms: true,
+        acceptPrivacy: true,
+        termsVersion: '2026-02',
+        privacyVersion: '2026-02',
+      },
+    });
+    assert.equal(regClientC.status, 201);
+    const clientCId = regClientC.json.data.account.id;
+
+    const dbRow = await env.DB.prepare(
+      `SELECT terms_accepted, terms_accepted_at, terms_version,
+              privacy_accepted, privacy_accepted_at, privacy_version, legal_accepted_ip
+       FROM customer_accounts WHERE id = ?`
+    )
+      .bind(clientCId)
+      .first();
+    assert.equal(dbRow.terms_accepted, 1);
+    assert.ok(dbRow.terms_accepted_at);
+    assert.equal(dbRow.terms_version, '2026-02');
+    assert.equal(dbRow.privacy_accepted, 1);
+    assert.ok(dbRow.privacy_accepted_at);
+    assert.equal(dbRow.privacy_version, '2026-02');
+    assert.equal(dbRow.legal_accepted_ip, '10.4.0.3');
+
+    // Resend verification failure returns 503 EMAIL_DELIVERY_FAILED instead of misleading 200 OK
+    emailShouldFail = true;
+    const resendFail = await apiRequest('/api/v1/client/auth/resend-verification', {
+      method: 'POST',
+      ip: '10.4.0.4',
+      body: { email: 'clientc@dtks-test.studio' },
+    });
+    emailShouldFail = false;
+    assert.equal(resendFail.status, 503);
+    assert.equal(resendFail.json.error.code, 'EMAIL_DELIVERY_FAILED');
+    assert.equal(resendFail.json.error.details.verificationEmailSent, false);
+
+    // Resend verification recovery succeeds and revokes older token
+    const oldTokenC = extractTokenFromLatestEmail('clientc@dtks-test.studio');
+    const resendOk = await apiRequest('/api/v1/client/auth/resend-verification', {
+      method: 'POST',
+      ip: '10.4.0.5',
+      body: { email: 'clientc@dtks-test.studio' },
+    });
+    assert.equal(resendOk.status, 200);
+    const newTokenC = extractTokenFromLatestEmail('clientc@dtks-test.studio');
+    assert.notEqual(newTokenC, oldTokenC);
+
+    const oldVerifyAttempt = await apiRequest('/api/v1/client/auth/verify-email', {
+      method: 'POST',
+      body: { token: oldTokenC },
+    });
+    assert.equal(oldVerifyAttempt.status, 400);
+
+    const verifyOk = await apiRequest('/api/v1/client/auth/verify-email', {
+      method: 'POST',
+      body: { token: newTokenC },
+    });
+    assert.equal(verifyOk.status, 200);
+
+    // Forgot password failure for verified client returns 503 EMAIL_DELIVERY_FAILED
+    emailShouldFail = true;
+    const forgotFail = await apiRequest('/api/v1/client/auth/forgot-password', {
+      method: 'POST',
+      ip: '10.4.0.6',
+      body: { email: 'clientc@dtks-test.studio' },
+    });
+    emailShouldFail = false;
+    assert.equal(forgotFail.status, 503);
+    assert.equal(forgotFail.json.error.code, 'EMAIL_DELIVERY_FAILED');
+  });
+
+  it('C3. Client Reset Password (newPassword/Concurrency), Change Password Invalidation & Single vs All-Devices Logout', async () => {
+    // 1. Trigger password reset for Client C
+    const forgotOk = await apiRequest('/api/v1/client/auth/forgot-password', {
+      method: 'POST',
+      ip: '10.5.0.1',
+      body: { email: 'clientc@dtks-test.studio' },
+    });
+    assert.equal(forgotOk.status, 200);
+    const resetTok = extractTokenFromLatestEmail('clientc@dtks-test.studio');
+
+    // Validation with newPassword key + missing confirmPassword returns distinct field errors
+    const missingConfirmReset = await apiRequest('/api/v1/client/auth/reset-password', {
+      method: 'POST',
+      ip: '10.5.0.2',
+      body: { token: resetTok, newPassword: 'weak' },
+    });
+    assert.equal(missingConfirmReset.status, 400);
+    assert.ok(missingConfirmReset.json.error.details.newPassword);
+    assert.equal(
+      missingConfirmReset.json.error.details.confirmPassword,
+      'Password confirmation is required.'
+    );
+
+    // Concurrent reset-password requests with newPassword + confirmPassword: strictly one succeeds
+    const nextPass = 'ClientC#2026!ResetStrong';
+    const [r1, r2] = await Promise.all([
+      apiRequest('/api/v1/client/auth/reset-password', {
+        method: 'POST',
+        ip: '10.5.0.3',
+        body: { token: resetTok, newPassword: nextPass, confirmPassword: nextPass },
+      }),
+      apiRequest('/api/v1/client/auth/reset-password', {
+        method: 'POST',
+        ip: '10.5.0.4',
+        body: { token: resetTok, newPassword: nextPass, confirmPassword: nextPass },
+      }),
+    ]);
+    assert.deepEqual([r1.status, r2.status].sort(), [200, 400]);
+
+    // 2. Log Client C in on Device 1 and Device 2
+    const dev1 = await apiRequest('/api/v1/client/auth/login', {
+      method: 'POST',
+      ip: '10.5.0.5',
+      body: { email: 'clientc@dtks-test.studio', password: nextPass },
+    });
+    const dev2 = await apiRequest('/api/v1/client/auth/login', {
+      method: 'POST',
+      ip: '10.5.0.6',
+      body: { email: 'clientc@dtks-test.studio', password: nextPass },
+    });
+    assert.equal(dev1.status, 200);
+    assert.equal(dev2.status, 200);
+
+    // Check /client/auth/me exposes persisted legal acceptance metadata
+    const meC = await apiRequest('/api/v1/client/auth/me', {
+      token: dev1.json.data.accessToken,
+    });
+    assert.equal(meC.status, 200);
+    assert.equal(meC.json.data.client.termsAccepted, true);
+    assert.equal(meC.json.data.client.termsVersion, '2026-02');
+    assert.equal(meC.json.data.client.privacyAccepted, true);
+
+    // Unauthenticated allDevices: true logout must be rejected with 401
+    const unauthAllLogout = await apiRequest('/api/v1/client/auth/logout', {
+      method: 'POST',
+      body: { refreshToken: dev1.json.data.refreshToken, allDevices: true },
+    });
+    assert.equal(unauthAllLogout.status, 401);
+
+    // Non-boolean allDevices rejected with 400
+    const badAllDevicesType = await apiRequest('/api/v1/client/auth/logout', {
+      method: 'POST',
+      token: dev1.json.data.accessToken,
+      body: { allDevices: 'yes' },
+    });
+    assert.equal(badAllDevicesType.status, 400);
+
+    // Single-device logout on Device 1 leaves Device 2 working
+    const singleLogoutC = await apiRequest('/api/v1/client/auth/logout', {
+      method: 'POST',
+      token: dev1.json.data.accessToken,
+      body: { refreshToken: dev1.json.data.refreshToken },
+    });
+    assert.equal(singleLogoutC.status, 200);
+    assert.equal(singleLogoutC.json.data.allDevices, false);
+    assert.equal(singleLogoutC.json.data.scope, 'single_device');
+    assert.equal(singleLogoutC.json.data.sessionsRevoked, 1);
+
+    const dev1RefreshFail = await apiRequest('/api/v1/client/auth/refresh', {
+      method: 'POST',
+      body: { refreshToken: dev1.json.data.refreshToken },
+    });
+    assert.equal(dev1RefreshFail.status, 401);
+
+    const dev2MeOk = await apiRequest('/api/v1/client/auth/me', {
+      token: dev2.json.data.accessToken,
+    });
+    assert.equal(dev2MeOk.status, 200);
+
+    // All-devices logout on Device 2 invalidates Device 2 access & refresh tokens
+    const allLogoutC = await apiRequest('/api/v1/client/auth/logout', {
+      method: 'POST',
+      token: dev2.json.data.accessToken,
+      body: { refreshToken: dev2.json.data.refreshToken, allDevices: true },
+    });
+    assert.equal(allLogoutC.status, 200);
+    assert.equal(allLogoutC.json.data.allDevices, true);
+    assert.equal(allLogoutC.json.data.scope, 'all_devices');
+
+    const dev2MeRevoked = await apiRequest('/api/v1/client/auth/me', {
+      token: dev2.json.data.accessToken,
+    });
+    assert.equal(dev2MeRevoked.status, 401);
+    assert.equal(dev2MeRevoked.json.error.code, 'SESSION_REVOKED');
+
+    const dev2RefreshRevoked = await apiRequest('/api/v1/client/auth/refresh', {
+      method: 'POST',
+      body: { refreshToken: dev2.json.data.refreshToken },
+    });
+    assert.equal(dev2RefreshRevoked.status, 401);
+
+    // 3. Change-password revokes active client access & refresh tokens
+    const loginBeforeChange = await apiRequest('/api/v1/client/auth/login', {
+      method: 'POST',
+      ip: '10.5.0.7',
+      body: { email: 'clientc@dtks-test.studio', password: nextPass },
+    });
+    assert.equal(loginBeforeChange.status, 200);
+
+    const changedPass = 'ClientC#2026!ChangedStrong';
+    const changeClientPw = await apiRequest('/api/v1/client/auth/change-password', {
+      method: 'POST',
+      token: loginBeforeChange.json.data.accessToken,
+      body: {
+        currentPassword: nextPass,
+        newPassword: changedPass,
+        confirmPassword: changedPass,
+      },
+    });
+    assert.equal(changeClientPw.status, 200);
+
+    const oldClientMe = await apiRequest('/api/v1/client/auth/me', {
+      token: loginBeforeChange.json.data.accessToken,
+    });
+    assert.equal(oldClientMe.status, 401);
+    assert.equal(oldClientMe.json.error.code, 'SESSION_REVOKED');
+
+    const oldClientRefresh = await apiRequest('/api/v1/client/auth/refresh', {
+      method: 'POST',
+      body: { refreshToken: loginBeforeChange.json.data.refreshToken },
+    });
+    assert.equal(oldClientRefresh.status, 401);
+  });
+
+  it('E1. Migration 0004 Re-Open Idempotency on Existing SQLite Database', async () => {
+    env?.DB?.close?.();
+    env = createNodeWorkerEnv({
+      dbPath,
+      r2Dir,
+      overrides: {
+        ENVIRONMENT: 'development',
+        APP_URL: 'https://dreamtechkashmirsolutions.studio',
+        JWT_SECRET: TEST_JWT_SECRET,
+        INITIAL_ADMIN_NAME: 'Principal Super Admin',
+        INITIAL_ADMIN_EMAIL: TEST_SUPER_EMAIL,
+        INITIAL_ADMIN_PASSWORD: TEST_SUPER_PASSWORD,
+        RESEND_API_KEY: 're_test_live_mock_key_123456',
+      },
+    });
+    const checkCol = await env.DB.prepare(
+      'SELECT terms_accepted, privacy_version FROM customer_accounts LIMIT 1'
+    ).first();
+    assert.ok(checkCol !== undefined);
+  });
 });
+

@@ -16,7 +16,7 @@ This guide covers deploying the **DreamTech Kashmir Solutions (DTKS)** standalon
 
 ## 2. Apply D1 Database Migrations (Safe & Non-Destructive)
 
-Apply the additive D1 migrations (`0001_initial_schema.sql`, `0002_seed_data.sql`, and `0003_admin_accounts_and_client_auth.sql` — 17 tables total including `admin_invitations`, `customer_accounts`, `customer_refresh_sessions`, and `customer_auth_tokens`) to the existing `dtks-production-db` (`be0ce24a-0151-412f-b308-1271bb62abba`):
+Apply the additive D1 migrations (`0001_initial_schema.sql`, `0002_seed_data.sql`, `0003_admin_accounts_and_client_auth.sql`, and `0004_client_legal_acceptance_and_security_fixes.sql` — 17 tables total including `admin_invitations`, `customer_accounts`, `customer_refresh_sessions`, and `customer_auth_tokens`) to the existing `dtks-production-db` (`be0ce24a-0151-412f-b308-1271bb62abba`):
 
 ```bash
 cd backend

@@ -101,6 +101,14 @@ Protected endpoints accept either:
 
 > **Strict Token Isolation:** Admin JWTs (`accountType: "admin"`) are rejected by all `/api/v1/client/*` routes (`401`), and Client JWTs (`accountType: "client"`) are rejected by all Admin routes (`401`).
 
+### Token Storage Assessment & Planned HttpOnly Cookie Migration
+
+Currently, login/refresh endpoints return `accessToken`, `refreshToken`, and `csrfToken` in JSON for SPA Bearer/sessionStorage transport (compatible with cross-origin Cloudflare Workers deployments and the current DTKS frontend), while `authenticateAdmin` and `authenticateClient` **already** support HttpOnly cookie + CSRF double-submit header authentication. Moving away from browser `sessionStorage` to pure HttpOnly cookies requires a coordinated two-repository release:
+
+1. Add `Set-Cookie` headers (`HttpOnly; Secure; SameSite=Lax` or `None` if cross-site, scoped `Path=/api/v1`) and omit raw tokens from JSON only when clients opt in via cookie mode (e.g. `X-Auth-Transport: cookie`).
+2. Add cookie clearing (`Max-Age=0`) on `/auth/logout` and `/client/auth/logout`.
+3. Update the `DTKS` frontend API client to send `credentials: 'include'` + `X-CSRF-Token` and remove `sessionStorage` token storage once verified in staging.
+
 ---
 
 ## 4. Endpoints Reference
@@ -145,7 +153,7 @@ Validates a refresh token against `refresh_sessions`, revokes the old session (`
 - **Request Body:** `{ "refreshToken": "<refreshToken>" }`
 
 #### `POST /api/v1/auth/logout`
-Revokes the active refresh session in `refresh_sessions` and clears auth cookies.
+Revokes a single `refreshToken` (`allDevices: false`, `scope: "single_device"`) or revokes all active sessions + increments `token_version` (`allDevices: true` with authenticated admin session, `scope: "all_devices"`). Returns `{ loggedOut, allDevices, scope, sessionsRevoked }`.
 
 #### `GET /api/v1/auth/me`
 - **Auth Required:** Yes (`BearerAuth` - Admin)
@@ -186,9 +194,9 @@ Revokes the active refresh session in `refresh_sessions` and clears auth cookies
 
 | Method | Endpoint | Auth / Role | Description |
 | :--- | :--- | :--- | :--- |
-| `GET` | `/api/v1/admin/accounts` | `super_admin`, `admin` | List admin accounts with `activeSessionCount` and `invitePending` (supports `?role=`, `?isActive=`, `?search=`) |
+| `GET` | `/api/v1/admin/accounts` | `super_admin`, `admin` | List admin accounts with `activeSessionCount`, `invitePending`, and `pagination` (`?search=`, `?role=`, `?status=all\|active\|inactive`, `?isActive=`, `?page=`, `?limit=`) |
 | `GET` | `/api/v1/admin/accounts/:id` | `super_admin`, `admin` | Inspect admin account, recent refresh sessions, and latest invitation metadata |
-| `POST` | `/api/v1/admin/accounts` | `super_admin` only | Create pending admin account (`isActive: false`) and dispatch 48h invitation email via Resend |
+| `POST` | `/api/v1/admin/accounts` | `super_admin` only | Create pending admin account (`isActive: false`) and dispatch 48h invitation email via Resend (`503` includes `adminCreated`, `invitationEmailSent`, `deliveryStatus`, `account`) |
 | `POST` | `/api/v1/admin/accounts/:id/resend-invite` | `super_admin` only | Revoke prior unused invite tokens and resend fresh invitation email for pending admins |
 | `PATCH` | `/api/v1/admin/accounts/:id` | `super_admin` only | Update `name` and/or `role` (`super_admin`, `admin`, `editor`). Role changes revoke all sessions & bump `token_version`. Protects last active `super_admin` (`409 LAST_SUPER_ADMIN_PROTECTED`) |
 | `PATCH` | `/api/v1/admin/accounts/:id/status` | `super_admin` only | Activate (`{ "isActive": true }`) or deactivate (`{ "isActive": false }`) an account. Deactivation sets `deactivated_at`, bumps `token_version`, and revokes sessions. Protects last active `super_admin` |
@@ -200,17 +208,17 @@ Revokes the active refresh session in `refresh_sessions` and clears auth cookies
 
 | Method | Endpoint | Auth | Rate Limit | Description |
 | :--- | :--- | :--- | :--- | :--- |
-| `POST` | `/api/v1/client/auth/register` | Public | 10 / 15m | Register client account (`fullName`, `email`, `phone`, `password`, `confirmPassword`, optional `city`, `businessName`), send 24h verification email (`503` if email provider unconfigured/fails) |
-| `POST` | `/api/v1/client/auth/resend-verification` | Public | 15 / 15m | Resend verification link (`{ "email" }`); returns uniform `200 OK` when provider is configured to prevent email enumeration |
+| `POST` | `/api/v1/client/auth/register` | Public | 10 / 15m | Register client account (`fullName`, `email`, `phone`, `password`, `confirmPassword`, `acceptTerms: true`, optional `city`, `businessName`, `acceptPrivacy`), persist legal acceptance timestamps/versions/IP, send 24h verification email (`503` includes `accountCreated`, `accountPendingVerification`, `canResendVerification`, `deliveryStatus`) |
+| `POST` | `/api/v1/client/auth/resend-verification` | Public | 15 / 15m | Resend verification link (`{ "email" }`); returns `503 EMAIL_DELIVERY_FAILED` / `EMAIL_PROVIDER_UNCONFIGURED` if email delivery fails, or `200 OK` otherwise |
 | `POST` | `/api/v1/client/auth/verify-email` | Public | 15 / 15m | Verify single-use SHA-256-hashed token (`{ "token" }`), activate email verification, and safely link existing `customers` + historical unlinked `orders` matching verified email |
 | `POST` | `/api/v1/client/auth/login` | Public | 10 / 15m | Authenticate verified, active client; returns `accessToken`, rotated `refreshToken`, `csrfToken`, `expiresIn`, and `client` profile |
 | `POST` | `/api/v1/client/auth/refresh` | Public | 30 / 15m | Rotate `customer_refresh_sessions` token and issue new access + refresh token pair |
-| `POST` | `/api/v1/client/auth/logout` | Client or Refresh Token | General | Revoke current refresh token (or all sessions + bump `token_version` when authenticated without body token) |
-| `GET` | `/api/v1/client/auth/me` | Client (`BearerAuth`) | General | Get current authenticated client profile |
+| `POST` | `/api/v1/client/auth/logout` | Client or Refresh Token | General | Single-device (`{ refreshToken }`) revokes only that session without bumping `token_version`; `{ allDevices: true }` (requires authenticated client -> `401` otherwise) revokes all sessions and increments `token_version` |
+| `GET` | `/api/v1/client/auth/me` | Client (`BearerAuth`) | General | Get current authenticated client profile (including `termsAccepted`, `termsVersion`, `privacyAccepted`, `privacyVersion`) |
 | `PATCH` | `/api/v1/client/auth/profile` | Client (`BearerAuth`) | General | Update `fullName`, `phone`, `city`, `businessName` (synced to linked `customers` row; rejects `email`, `role`, `isActive`, etc.) |
 | `POST` | `/api/v1/client/auth/change-password` | Client (`BearerAuth`) | General | Verify `currentPassword`, set strong `newPassword`, revoke all sessions, bump `token_version`, and send security notification email |
-| `POST` | `/api/v1/client/auth/forgot-password` | Public | 8 / 15m | Issue 1h single-use SHA-256-hashed password reset token via Resend (`503` if unconfigured; otherwise uniform `200 OK`) |
-| `POST` | `/api/v1/client/auth/reset-password` | Public | 8 / 15m | Consume single-use reset token (`token`, `password`, `confirmPassword`), revoke all sessions, bump `token_version`, and send security notification email |
+| `POST` | `/api/v1/client/auth/forgot-password` | Public | 8 / 15m | Issue 1h single-use SHA-256-hashed password reset token via Resend (`503` if unconfigured or delivery fails; otherwise uniform `200 OK`) |
+| `POST` | `/api/v1/client/auth/reset-password` | Public | 8 / 15m | Consume single-use reset token (`token`, `password` or `newPassword`, `confirmPassword`), revoke all sessions, bump `token_version`, and send security notification email |
 | `POST` | `/api/v1/client/auth/deactivate` | Client (`BearerAuth`) | General | Confirm `password`, deactivate account (`isActive: false`), revoke all sessions, bump `token_version`, and send security alert email |
 
 ---

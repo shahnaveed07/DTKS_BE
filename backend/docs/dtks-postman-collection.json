@@ -428,7 +428,7 @@
             "url": "{{baseUrl}}/client/auth/register",
             "body": {
               "mode": "raw",
-              "raw": "{\n  \"fullName\": \"Amina Jan\",\n  \"email\": \"amina@example.com\",\n  \"phone\": \"+91 99061 55501\",\n  \"city\": \"Srinagar\",\n  \"businessName\": \"Heritage Crafts\",\n  \"password\": \"ClientPass#2026!\",\n  \"confirmPassword\": \"ClientPass#2026!\"\n}"
+              "raw": "{\n  \"fullName\": \"Amina Jan\",\n  \"email\": \"amina@example.com\",\n  \"phone\": \"+91 99061 55501\",\n  \"city\": \"Srinagar\",\n  \"businessName\": \"Heritage Crafts\",\n  \"password\": \"ClientPass#2026!\",\n  \"confirmPassword\": \"ClientPass#2026!\",\n  \"acceptTerms\": true\n}"
             }
           }
         },

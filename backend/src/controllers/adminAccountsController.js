@@ -1,5 +1,8 @@
 import {
   ADMIN_INVITE_EXPIRY_SECONDS,
+  DEFAULT_ADMIN_ACCOUNTS_LIMIT,
+  DEFAULT_ADMIN_ACCOUNTS_PAGE,
+  MAX_ADMIN_ACCOUNTS_LIMIT,
   PENDING_INVITE_PASSWORD_SENTINEL,
 } from '../config/constants.js';
 import {
@@ -17,6 +20,11 @@ import {
 } from '../validators/schemas.js';
 import { logAdminActivity } from '../services/auditService.js';
 import { sendAdminInvitationEmail } from '../services/emailService.js';
+
+function getAdminInviteExpirySeconds(env = {}) {
+  const configured = Number.parseInt(String(env?.ADMIN_INVITE_EXPIRY_SECONDS || ''), 10);
+  return Number.isFinite(configured) && configured > 0 ? configured : ADMIN_INVITE_EXPIRY_SECONDS;
+}
 
 function mapAdminAccountRow(row, extra = {}) {
   if (!row) return null;
@@ -49,8 +57,20 @@ function mapAdminAccountRow(row, extra = {}) {
 export async function listAdminAccounts(request, env) {
   const url = new URL(request.url);
   const role = (url.searchParams.get('role') || '').trim().toLowerCase();
+  const rawStatus = (url.searchParams.get('status') || '').trim().toLowerCase();
+  const status = ['all', 'active', 'inactive'].includes(rawStatus) ? rawStatus : '';
   const isActiveParam = url.searchParams.get('is_active') ?? url.searchParams.get('isActive');
   const search = (url.searchParams.get('search') || url.searchParams.get('q') || '').trim();
+
+  const parsedPage = Number.parseInt(url.searchParams.get('page') || '', 10);
+  const page =
+    Number.isFinite(parsedPage) && parsedPage >= 1 ? parsedPage : DEFAULT_ADMIN_ACCOUNTS_PAGE;
+  const parsedLimit = Number.parseInt(url.searchParams.get('limit') || '', 10);
+  const limit =
+    Number.isFinite(parsedLimit) && parsedLimit >= 1
+      ? Math.min(MAX_ADMIN_ACCOUNTS_LIMIT, parsedLimit)
+      : DEFAULT_ADMIN_ACCOUNTS_LIMIT;
+  const offset = (page - 1) * limit;
 
   const conditions = [];
   const params = [];
@@ -59,34 +79,44 @@ export async function listAdminAccounts(request, env) {
     conditions.push('a.role = ?');
     params.push(role);
   }
-  if (isActiveParam === 'true' || isActiveParam === '1') {
+
+  if (status === 'active') {
+    conditions.push('a.is_active = 1');
+  } else if (status === 'inactive') {
+    conditions.push('a.is_active = 0');
+  } else if (isActiveParam === 'true' || isActiveParam === '1') {
     conditions.push('a.is_active = 1');
   } else if (isActiveParam === 'false' || isActiveParam === '0') {
     conditions.push('a.is_active = 0');
   }
+
   if (search) {
     conditions.push('(a.name LIKE ? OR a.email LIKE ?)');
     const pattern = `%${search}%`;
     params.push(pattern, pattern);
   }
 
-  let sql = `
+  const whereClause = conditions.length > 0 ? ` WHERE ${conditions.join(' AND ')}` : '';
+
+  const countRow = await env.DB.prepare(`SELECT COUNT(*) AS total FROM admins a${whereClause}`)
+    .bind(...params)
+    .first();
+  const total = Number(countRow?.total || 0);
+  const totalPages = Math.max(1, Math.ceil(total / limit));
+
+  const nowIso = new Date().toISOString();
+  const sql = `
     SELECT a.id, a.name, a.email, a.password_hash, a.role, a.is_active,
            a.invited_by_admin_id, a.invite_accepted_at, a.deactivated_at,
            a.last_login_at, a.created_at, a.updated_at,
            (SELECT COUNT(*) FROM refresh_sessions rs
             WHERE rs.admin_id = a.id AND rs.revoked_at IS NULL AND rs.expires_at > ?) AS activeSessionCount
-    FROM admins a`;
-  const nowIso = new Date().toISOString();
-  const bindParams = [nowIso, ...params];
-
-  if (conditions.length > 0) {
-    sql += ` WHERE ${conditions.join(' AND ')}`;
-  }
-  sql += ' ORDER BY a.created_at ASC';
+    FROM admins a${whereClause}
+    ORDER BY a.created_at ASC
+    LIMIT ? OFFSET ?`;
 
   const result = await env.DB.prepare(sql)
-    .bind(...bindParams)
+    .bind(nowIso, ...params, limit, offset)
     .all();
 
   const accounts = (result.results || []).map((row) =>
@@ -95,7 +125,20 @@ export async function listAdminAccounts(request, env) {
     })
   );
 
-  return successResponse({ accounts }, 'Administrator accounts retrieved.');
+  return successResponse(
+    {
+      accounts,
+      pagination: {
+        page,
+        limit,
+        total,
+        totalPages,
+        hasNextPage: page < totalPages,
+        hasPrevPage: page > 1,
+      },
+    },
+    'Administrator accounts retrieved.'
+  );
 }
 
 export async function getAdminAccountById(request, env, id) {
@@ -194,23 +237,41 @@ export async function createAdminAccount(request, env, currentAdmin) {
   const inviteId = generateRandomId('inv');
   const rawInviteToken = generateRandomToken(32);
   const inviteTokenHash = await sha256Hex(rawInviteToken);
-  const inviteExpiresAt = new Date(Date.now() + ADMIN_INVITE_EXPIRY_SECONDS * 1000).toISOString();
+  const inviteExpirySeconds = getAdminInviteExpirySeconds(env);
+  const inviteExpiresAt = new Date(Date.now() + inviteExpirySeconds * 1000).toISOString();
 
-  await env.DB.prepare(
-    `INSERT INTO admins
-     (id, name, email, password_hash, role, is_active, token_version, invited_by_admin_id, created_at, updated_at, last_login_at)
-     VALUES (?, ?, ?, ?, ?, 0, 1, ?, ?, ?, NULL)`
-  )
-    .bind(adminId, name, email, PENDING_INVITE_PASSWORD_SENTINEL, role, currentAdmin.id, now, now)
-    .run();
-
-  await env.DB.prepare(
-    `INSERT INTO admin_invitations
-     (id, admin_id, email, token_hash, invited_by_admin_id, expires_at, used_at, revoked_at, created_at)
-     VALUES (?, ?, ?, ?, ?, ?, NULL, NULL, ?)`
-  )
-    .bind(inviteId, adminId, email, inviteTokenHash, currentAdmin.id, inviteExpiresAt, now)
-    .run();
+  try {
+    await env.DB.batch([
+      env.DB.prepare(
+        `INSERT INTO admins
+         (id, name, email, password_hash, role, is_active, token_version, invited_by_admin_id, created_at, updated_at, last_login_at)
+         VALUES (?, ?, ?, ?, ?, 0, 1, ?, ?, ?, NULL)`
+      ).bind(
+        adminId,
+        name,
+        email,
+        PENDING_INVITE_PASSWORD_SENTINEL,
+        role,
+        currentAdmin.id,
+        now,
+        now
+      ),
+      env.DB.prepare(
+        `INSERT INTO admin_invitations
+         (id, admin_id, email, token_hash, invited_by_admin_id, expires_at, used_at, revoked_at, created_at)
+         VALUES (?, ?, ?, ?, ?, ?, NULL, NULL, ?)`
+      ).bind(inviteId, adminId, email, inviteTokenHash, currentAdmin.id, inviteExpiresAt, now),
+    ]);
+  } catch (err) {
+    if (/UNIQUE constraint failed/i.test(String(err?.message || ''))) {
+      return errorResponse(
+        'An administrator account with this email address already exists.',
+        409,
+        'ADMIN_EMAIL_EXISTS'
+      );
+    }
+    throw err;
+  }
 
   await logAdminActivity(env, {
     adminId: currentAdmin.id,
@@ -227,7 +288,7 @@ export async function createAdminAccount(request, env, currentAdmin) {
     name,
     role,
     inviteToken: rawInviteToken,
-    expiresHours: Math.round(ADMIN_INVITE_EXPIRY_SECONDS / 3600),
+    expiresHours: Math.max(1, Math.round(inviteExpirySeconds / 3600)),
     invitedByName: currentAdmin.name,
   });
 
@@ -269,7 +330,7 @@ export async function createAdminAccount(request, env, currentAdmin) {
 
 export async function resendAdminInvitation(request, env, currentAdmin, id) {
   const target = await env.DB.prepare(
-    `SELECT id, name, email, password_hash, role, is_active
+    `SELECT id, name, email, password_hash, role, is_active, deactivated_at
      FROM admins WHERE id = ?`
   )
     .bind(id)
@@ -277,6 +338,14 @@ export async function resendAdminInvitation(request, env, currentAdmin, id) {
 
   if (!target) {
     return errorResponse('Administrator account not found.', 404, 'NOT_FOUND');
+  }
+
+  if (target.deactivated_at) {
+    return errorResponse(
+      'Cannot resend invitation for a deactivated administrator account.',
+      403,
+      'ACCOUNT_DEACTIVATED'
+    );
   }
 
   if (target.password_hash !== PENDING_INVITE_PASSWORD_SENTINEL) {
@@ -288,23 +357,21 @@ export async function resendAdminInvitation(request, env, currentAdmin, id) {
   }
 
   const now = new Date().toISOString();
-  await env.DB.prepare(
-    'UPDATE admin_invitations SET revoked_at = ? WHERE admin_id = ? AND used_at IS NULL AND revoked_at IS NULL'
-  )
-    .bind(now, target.id)
-    .run();
-
   const inviteId = generateRandomId('inv');
   const rawInviteToken = generateRandomToken(32);
   const inviteTokenHash = await sha256Hex(rawInviteToken);
-  const inviteExpiresAt = new Date(Date.now() + ADMIN_INVITE_EXPIRY_SECONDS * 1000).toISOString();
+  const inviteExpirySeconds = getAdminInviteExpirySeconds(env);
+  const inviteExpiresAt = new Date(Date.now() + inviteExpirySeconds * 1000).toISOString();
 
-  await env.DB.prepare(
-    `INSERT INTO admin_invitations
-     (id, admin_id, email, token_hash, invited_by_admin_id, expires_at, used_at, revoked_at, created_at)
-     VALUES (?, ?, ?, ?, ?, ?, NULL, NULL, ?)`
-  )
-    .bind(
+  await env.DB.batch([
+    env.DB.prepare(
+      'UPDATE admin_invitations SET revoked_at = ? WHERE admin_id = ? AND used_at IS NULL AND revoked_at IS NULL'
+    ).bind(now, target.id),
+    env.DB.prepare(
+      `INSERT INTO admin_invitations
+       (id, admin_id, email, token_hash, invited_by_admin_id, expires_at, used_at, revoked_at, created_at)
+       VALUES (?, ?, ?, ?, ?, ?, NULL, NULL, ?)`
+    ).bind(
       inviteId,
       target.id,
       target.email,
@@ -312,8 +379,8 @@ export async function resendAdminInvitation(request, env, currentAdmin, id) {
       currentAdmin.id,
       inviteExpiresAt,
       now
-    )
-    .run();
+    ),
+  ]);
 
   await logAdminActivity(env, {
     adminId: currentAdmin.id,
@@ -330,7 +397,7 @@ export async function resendAdminInvitation(request, env, currentAdmin, id) {
     name: target.name,
     role: target.role,
     inviteToken: rawInviteToken,
-    expiresHours: Math.round(ADMIN_INVITE_EXPIRY_SECONDS / 3600),
+    expiresHours: Math.max(1, Math.round(inviteExpirySeconds / 3600)),
     invitedByName: currentAdmin.name,
   });
 
@@ -342,6 +409,7 @@ export async function resendAdminInvitation(request, env, currentAdmin, id) {
         ? 'EMAIL_PROVIDER_UNCONFIGURED'
         : 'EMAIL_DELIVERY_FAILED',
       {
+        adminId: target.id,
         invitationEmailSent: false,
         deliveryStatus: emailResult.status,
       }
@@ -396,25 +464,69 @@ export async function acceptAdminInvite(request, env) {
     );
   }
 
+  const targetAdmin = await env.DB.prepare(
+    `SELECT id, email, password_hash, is_active, deactivated_at
+     FROM admins WHERE id = ?`
+  )
+    .bind(invite.admin_id)
+    .first();
+
+  if (!targetAdmin) {
+    return errorResponse('Administrator account not found.', 404, 'NOT_FOUND');
+  }
+  if (targetAdmin.deactivated_at) {
+    return errorResponse(
+      'This administrator account has been deactivated.',
+      403,
+      'ACCOUNT_DEACTIVATED'
+    );
+  }
+  if (targetAdmin.password_hash !== PENDING_INVITE_PASSWORD_SENTINEL) {
+    return errorResponse(
+      'This administrator account has already been activated.',
+      400,
+      'INVITE_ALREADY_ACCEPTED'
+    );
+  }
+
   const passwordHash = await hashPassword(password);
   const now = new Date().toISOString();
 
-  await env.DB.prepare('UPDATE admin_invitations SET used_at = ? WHERE id = ?')
+  // Atomically claim the single-use invitation first so concurrent requests cannot double-consume
+  const claimRes = await env.DB.prepare(
+    `UPDATE admin_invitations
+     SET used_at = ?
+     WHERE id = ? AND used_at IS NULL AND revoked_at IS NULL`
+  )
     .bind(now, invite.id)
     .run();
-  await env.DB.prepare(
-    'UPDATE admin_invitations SET revoked_at = ? WHERE admin_id = ? AND id != ? AND used_at IS NULL AND revoked_at IS NULL'
-  )
-    .bind(now, invite.admin_id, invite.id)
-    .run();
 
-  await env.DB.prepare(
-    `UPDATE admins
-     SET password_hash = ?, is_active = 1, invite_accepted_at = ?, deactivated_at = NULL, updated_at = ?
-     WHERE id = ?`
-  )
-    .bind(passwordHash, now, now, invite.admin_id)
-    .run();
+  if (Number(claimRes?.meta?.changes || 0) !== 1) {
+    return errorResponse(
+      'This invitation token has already been used or revoked.',
+      400,
+      'INVITE_TOKEN_ALREADY_USED'
+    );
+  }
+
+  try {
+    await env.DB.batch([
+      env.DB.prepare(
+        'UPDATE admin_invitations SET revoked_at = ? WHERE admin_id = ? AND id != ? AND used_at IS NULL AND revoked_at IS NULL'
+      ).bind(now, invite.admin_id, invite.id),
+      env.DB.prepare(
+        `UPDATE admins
+         SET password_hash = ?, is_active = 1, invite_accepted_at = ?, deactivated_at = NULL, updated_at = ?
+         WHERE id = ? AND password_hash = ? AND deactivated_at IS NULL`
+      ).bind(passwordHash, now, now, invite.admin_id, PENDING_INVITE_PASSWORD_SENTINEL),
+    ]);
+  } catch (err) {
+    await env.DB.prepare('UPDATE admin_invitations SET used_at = NULL WHERE id = ?')
+      .bind(invite.id)
+      .run()
+      .catch(() => {});
+    throw err;
+  }
 
   const updatedAdmin = await env.DB.prepare(
     `SELECT id, name, email, password_hash, role, is_active,
@@ -471,31 +583,35 @@ export async function updateAdminAccount(request, env, currentAdmin, id) {
   const nextName = validation.data.name !== undefined ? validation.data.name : existing.name;
   const nextRole = validation.data.role !== undefined ? validation.data.role : existing.role;
   const roleChanged = nextRole !== existing.role;
+  const now = new Date().toISOString();
 
-  // Prevent demoting the last active super_admin
-  if (existing.role === 'super_admin' && existing.is_active && nextRole !== 'super_admin') {
-    const activeSuperAdmins = await env.DB.prepare(
-      "SELECT COUNT(*) AS cnt FROM admins WHERE role = 'super_admin' AND is_active = 1"
-    ).first();
-    if (Number(activeSuperAdmins?.cnt || 0) <= 1) {
+  if (roleChanged) {
+    // Atomic last-active-super-admin protection inside SQL WHERE clause
+    const updateRes = await env.DB.prepare(
+      `UPDATE admins
+       SET name = ?, role = ?, token_version = COALESCE(token_version, 1) + 1, updated_at = ?
+       WHERE id = ?
+         AND (
+           role != 'super_admin'
+           OR is_active = 0
+           OR ? = 'super_admin'
+           OR (SELECT COUNT(*) FROM admins WHERE role = 'super_admin' AND is_active = 1 AND id != ?) >= 1
+         )`
+    )
+      .bind(nextName, nextRole, now, existing.id, nextRole, existing.id)
+      .run();
+
+    if (Number(updateRes?.meta?.changes || 0) !== 1) {
       return errorResponse(
         'Cannot demote the last active super_admin account.',
         409,
         'LAST_SUPER_ADMIN_PROTECTED'
       );
     }
-  }
 
-  const now = new Date().toISOString();
-  if (roleChanged) {
     await env.DB.prepare(
-      `UPDATE admins
-       SET name = ?, role = ?, token_version = COALESCE(token_version, 1) + 1, updated_at = ?
-       WHERE id = ?`
+      'UPDATE refresh_sessions SET revoked_at = ? WHERE admin_id = ? AND revoked_at IS NULL'
     )
-      .bind(nextName, nextRole, now, existing.id)
-      .run();
-    await env.DB.prepare('UPDATE refresh_sessions SET revoked_at = ? WHERE admin_id = ?')
       .bind(now, existing.id)
       .run();
 
@@ -588,28 +704,31 @@ export async function updateAdminAccountStatus(request, env, currentAdmin, id) {
       request,
     });
   } else {
-    if (existing.role === 'super_admin' && existing.is_active) {
-      const activeSuperAdmins = await env.DB.prepare(
-        "SELECT COUNT(*) AS cnt FROM admins WHERE role = 'super_admin' AND is_active = 1"
-      ).first();
-      if (Number(activeSuperAdmins?.cnt || 0) <= 1) {
-        return errorResponse(
-          'Cannot deactivate the last active super_admin account.',
-          409,
-          'LAST_SUPER_ADMIN_PROTECTED'
-        );
-      }
+    // Atomic last-active-super-admin protection inside SQL WHERE clause
+    const deactivateRes = await env.DB.prepare(
+      `UPDATE admins
+       SET is_active = 0, deactivated_at = ?, token_version = COALESCE(token_version, 1) + 1, updated_at = ?
+       WHERE id = ?
+         AND (
+           role != 'super_admin'
+           OR is_active = 0
+           OR (SELECT COUNT(*) FROM admins WHERE role = 'super_admin' AND is_active = 1 AND id != ?) >= 1
+         )`
+    )
+      .bind(now, now, existing.id, existing.id)
+      .run();
+
+    if (Number(deactivateRes?.meta?.changes || 0) !== 1) {
+      return errorResponse(
+        'Cannot deactivate the last active super_admin account.',
+        409,
+        'LAST_SUPER_ADMIN_PROTECTED'
+      );
     }
 
     await env.DB.prepare(
-      `UPDATE admins
-       SET is_active = 0, deactivated_at = ?, token_version = COALESCE(token_version, 1) + 1, updated_at = ?
-       WHERE id = ?`
+      'UPDATE refresh_sessions SET revoked_at = ? WHERE admin_id = ? AND revoked_at IS NULL'
     )
-      .bind(now, now, existing.id)
-      .run();
-
-    await env.DB.prepare('UPDATE refresh_sessions SET revoked_at = ? WHERE admin_id = ?')
       .bind(now, existing.id)
       .run();
 
@@ -648,17 +767,14 @@ export async function revokeAdminAccountSessions(request, env, currentAdmin, id)
   }
 
   const now = new Date().toISOString();
-  const revokeRes = await env.DB.prepare(
-    'UPDATE refresh_sessions SET revoked_at = ? WHERE admin_id = ? AND revoked_at IS NULL'
-  )
-    .bind(now, existing.id)
-    .run();
-
-  await env.DB.prepare(
-    'UPDATE admins SET token_version = COALESCE(token_version, 1) + 1, updated_at = ? WHERE id = ?'
-  )
-    .bind(now, existing.id)
-    .run();
+  const [revokeRes] = await env.DB.batch([
+    env.DB.prepare(
+      'UPDATE refresh_sessions SET revoked_at = ? WHERE admin_id = ? AND revoked_at IS NULL'
+    ).bind(now, existing.id),
+    env.DB.prepare(
+      'UPDATE admins SET token_version = COALESCE(token_version, 1) + 1, updated_at = ? WHERE id = ?'
+    ).bind(now, existing.id),
+  ]);
 
   await logAdminActivity(env, {
     adminId: currentAdmin.id,

@@ -251,7 +251,9 @@ export function validateAcceptInviteInput(body = {}) {
   if (!strength.isValid) {
     errors.password = strength.error;
   }
-  if (!confirmPassword || confirmPassword !== password) {
+  if (!confirmPassword) {
+    errors.confirmPassword = 'Password confirmation is required.';
+  } else if (confirmPassword !== password) {
     errors.confirmPassword = 'Confirm password must match password.';
   }
 
@@ -278,6 +280,23 @@ export function validateClientRegisterInput(body = {}) {
       ? body.confirmPassword ?? body.confirm_password
       : '';
 
+  const rawAcceptTerms =
+    body.acceptTerms !== undefined
+      ? body.acceptTerms
+      : body.accept_terms !== undefined
+      ? body.accept_terms
+      : body.termsAccepted !== undefined
+      ? body.termsAccepted
+      : body.terms_accepted;
+  const rawAcceptPrivacy =
+    body.acceptPrivacy !== undefined
+      ? body.acceptPrivacy
+      : body.accept_privacy !== undefined
+      ? body.accept_privacy
+      : body.privacyAccepted !== undefined
+      ? body.privacyAccepted
+      : body.privacy_accepted;
+
   if (!fullName || fullName.length < 2) {
     errors.fullName = 'Full name is required (at least 2 characters).';
   }
@@ -291,14 +310,34 @@ export function validateClientRegisterInput(body = {}) {
   if (!strength.isValid) {
     errors.password = strength.error;
   }
-  if (!confirmPassword || confirmPassword !== password) {
+  if (!confirmPassword) {
+    errors.confirmPassword = 'Password confirmation is required.';
+  } else if (confirmPassword !== password) {
     errors.confirmPassword = 'Confirm password must match password.';
+  }
+  if (rawAcceptTerms !== true) {
+    errors.acceptTerms =
+      'You must accept the Terms & Conditions and Privacy Policy to create an account.';
+  }
+  if (rawAcceptPrivacy !== undefined && rawAcceptPrivacy !== true) {
+    errors.acceptPrivacy = 'You must accept the Privacy Policy to create an account.';
   }
 
   return {
     isValid: Object.keys(errors).length === 0,
     errors,
-    data: { fullName, email, phone, city, businessName, password },
+    data: {
+      fullName,
+      email,
+      phone,
+      city,
+      businessName,
+      password,
+      acceptTerms: rawAcceptTerms === true,
+      acceptPrivacy: rawAcceptPrivacy === undefined ? rawAcceptTerms === true : rawAcceptPrivacy === true,
+      termsVersion: sanitizeText(body.termsVersion ?? body.terms_version ?? '', 40),
+      privacyVersion: sanitizeText(body.privacyVersion ?? body.privacy_version ?? '', 40),
+    },
   };
 }
 
@@ -395,6 +434,9 @@ export function validateForgotPasswordInput(body = {}) {
 export function validateResetPasswordInput(body = {}) {
   const errors = {};
   const token = typeof body.token === 'string' ? body.token.trim() : '';
+  const usesNewPasswordKey =
+    body.password === undefined && (body.newPassword !== undefined || body.new_password !== undefined);
+  const passwordFieldKey = usesNewPasswordKey ? 'newPassword' : 'password';
   const password =
     typeof (body.password ?? body.newPassword ?? body.new_password) === 'string'
       ? body.password ?? body.newPassword ?? body.new_password
@@ -409,9 +451,11 @@ export function validateResetPasswordInput(body = {}) {
   }
   const strength = validateStrongPassword(password);
   if (!strength.isValid) {
-    errors.password = strength.error;
+    errors[passwordFieldKey] = strength.error;
   }
-  if (!confirmPassword || confirmPassword !== password) {
+  if (!confirmPassword) {
+    errors.confirmPassword = 'Password confirmation is required.';
+  } else if (confirmPassword !== password) {
     errors.confirmPassword = 'Confirm password must match password.';
   }
 

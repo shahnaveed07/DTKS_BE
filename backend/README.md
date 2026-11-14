@@ -50,9 +50,10 @@ backend/
 │       ├── constants.js               # Allowed statuses, roles, token lifetimes, MIME types & size limits
 │       └── cors.js                    # Allowed origin validation & CORS header builder (including X-CSRF-Token)
 ├── migrations/
-│   ├── 0001_initial_schema.sql                  # 13 core D1 tables, foreign keys, CHECK constraints & indexes
-│   ├── 0002_seed_data.sql                       # Non-destructive initial site settings migration (INSERT OR IGNORE)
-│   └── 0003_admin_accounts_and_client_auth.sql  # Additive admin invite/revocation columns + 4 client/invite tables
+│   ├── 0001_initial_schema.sql                          # 13 core D1 tables, foreign keys, CHECK constraints & indexes
+│   ├── 0002_seed_data.sql                               # Non-destructive initial site settings migration (INSERT OR IGNORE)
+│   ├── 0003_admin_accounts_and_client_auth.sql          # Additive admin invite/revocation columns + 4 client/invite tables
+│   └── 0004_client_legal_acceptance_and_security_fixes.sql # Client legal acceptance persistence & composite security indexes
 ├── tests/
 │   ├── backend.test.js                # 19 core API security, RBAC, CRUD, R2 & fault-handling test suites
 │   └── auth_and_accounts.test.js      # 9 admin account management, client auth, linking & isolation test suites
@@ -94,13 +95,13 @@ backend/
 
 ## 3. Relational Database Schema (Cloudflare D1)
 
-Defined across `migrations/0001_initial_schema.sql` and `migrations/0003_admin_accounts_and_client_auth.sql` with 17 tables, foreign keys, `CHECK` constraints, and indexes:
+Defined across `migrations/0001_initial_schema.sql`, `migrations/0003_admin_accounts_and_client_auth.sql`, and `migrations/0004_client_legal_acceptance_and_security_fixes.sql` with 17 tables, foreign keys, `CHECK` constraints, and indexes:
 
 1. `admins` – Administrator accounts (`id`, `name`, `email`, `password_hash`, `role`, `is_active`, `token_version`, `invited_by_admin_id`, `invite_accepted_at`, `deactivated_at`, `created_at`, `updated_at`, `last_login_at`)
 2. `admin_invitations` – Single-use expiring SHA-256-hashed admin onboarding invitations (`id`, `admin_id`, `email`, `token_hash`, `invited_by_admin_id`, `expires_at`, `used_at`, `revoked_at`, `created_at`)
 3. `refresh_sessions` – Hashed admin refresh token sessions (`id`, `admin_id`, `refresh_token_hash`, `user_agent`, `ip_address`, `expires_at`, `revoked_at`, `created_at`)
 4. `customers` – Customer profile records (`id`, `full_name`, `email`, `phone`, `city`, `business_name`, `created_at`, `updated_at`)
-5. `customer_accounts` – Client authentication accounts (`id`, `customer_id`, `full_name`, `email`, `phone`, `city`, `business_name`, `password_hash`, `is_email_verified`, `email_verified_at`, `is_active`, `deactivated_at`, `token_version`, `last_login_at`, `created_at`, `updated_at`)
+5. `customer_accounts` – Client authentication accounts (`id`, `customer_id`, `full_name`, `email`, `phone`, `city`, `business_name`, `password_hash`, `is_email_verified`, `email_verified_at`, `is_active`, `deactivated_at`, `token_version`, `terms_accepted`, `terms_accepted_at`, `terms_version`, `privacy_accepted`, `privacy_accepted_at`, `privacy_version`, `legal_accepted_ip`, `last_login_at`, `created_at`, `updated_at`)
 6. `customer_refresh_sessions` – Hashed client refresh token sessions (`id`, `customer_account_id`, `refresh_token_hash`, `user_agent`, `ip_address`, `expires_at`, `revoked_at`, `created_at`)
 7. `customer_auth_tokens` – Single-use expiring SHA-256-hashed verification and password-reset tokens (`id`, `customer_account_id`, `purpose`, `token_hash`, `expires_at`, `used_at`, `revoked_at`, `created_at`)
 8. `services` – Website services (`id`, `title`, `slug`, `description`, `features`, `image`, `price`, `is_active`, `display_order`, `created_at`, `updated_at`, plus metadata columns)

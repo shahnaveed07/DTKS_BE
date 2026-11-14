@@ -176,9 +176,24 @@ components:
         emailVerifiedAt: { type: string, format: date-time, nullable: true }
         isActive: { type: boolean }
         deactivatedAt: { type: string, format: date-time, nullable: true }
+        termsAccepted: { type: boolean }
+        termsAcceptedAt: { type: string, format: date-time, nullable: true }
+        termsVersion: { type: string }
+        privacyAccepted: { type: boolean }
+        privacyAcceptedAt: { type: string, format: date-time, nullable: true }
+        privacyVersion: { type: string }
         lastLoginAt: { type: string, format: date-time, nullable: true }
         createdAt: { type: string, format: date-time }
         updatedAt: { type: string, format: date-time }
+    PaginationMeta:
+      type: object
+      properties:
+        page: { type: integer, example: 1 }
+        limit: { type: integer, example: 20 }
+        total: { type: integer, example: 3 }
+        totalPages: { type: integer, example: 1 }
+        hasNextPage: { type: boolean, example: false }
+        hasPrevPage: { type: boolean, example: false }
 
 paths:
   /health:
@@ -236,9 +251,19 @@ paths:
     post:
       summary: Admin Logout & Session Revocation
       tags: [Authentication]
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                refreshToken: { type: string }
+                allDevices: { type: boolean, default: false }
       responses:
         '200':
-          description: Logged out and session revoked
+          description: Logged out (`scope` is `single_device` or `all_devices`)
+        '401':
+          description: Unauthorized (e.g. `allDevices: true` without authenticated admin)
   /auth/me:
     get:
       summary: Get Current Authenticated Admin
@@ -320,15 +345,24 @@ paths:
         - name: role
           in: query
           schema: { type: string, enum: [super_admin, admin, editor, all] }
+        - name: status
+          in: query
+          schema: { type: string, enum: [all, active, inactive] }
         - name: isActive
           in: query
           schema: { type: boolean }
         - name: search
           in: query
           schema: { type: string }
+        - name: page
+          in: query
+          schema: { type: integer, minimum: 1, default: 1 }
+        - name: limit
+          in: query
+          schema: { type: integer, minimum: 1, maximum: 100, default: 20 }
       responses:
         '200':
-          description: Admin accounts list
+          description: Filtered admin accounts list and pagination metadata (`data.accounts`, `data.pagination`)
         '403':
           description: Forbidden for editor role
     post:
@@ -461,7 +495,7 @@ paths:
           application/json:
             schema:
               type: object
-              required: [fullName, email, phone, password, confirmPassword]
+              required: [fullName, email, phone, password, confirmPassword, acceptTerms]
               properties:
                 fullName: { type: string }
                 email: { type: string, format: email }
@@ -470,13 +504,17 @@ paths:
                 businessName: { type: string }
                 password: { type: string, minLength: 8 }
                 confirmPassword: { type: string, minLength: 8 }
+                acceptTerms: { type: boolean, enum: [true] }
+                acceptPrivacy: { type: boolean }
       responses:
         '201':
-          description: Client registered and verification email dispatched
+          description: Client registered with persisted legal acceptance and verification email dispatched
+        '400':
+          description: Validation error (including missing acceptTerms or password mismatch)
         '409':
           description: Registration conflict
         '503':
-          description: Email provider unavailable or failed
+          description: Account created pending verification, but email provider unavailable/failed (`accountCreated`, `accountPendingVerification`, `verificationEmailSent`, `canResendVerification`, `deliveryStatus`)
   /client/auth/resend-verification:
     post:
       summary: Resend Client Verification Email
@@ -492,9 +530,9 @@ paths:
                 email: { type: string, format: email }
       responses:
         '200':
-          description: Uniform confirmation returned when provider is configured
+          description: Uniform confirmation returned when provider is configured and dispatch succeeds (or email does not match an active unverified account)
         '503':
-          description: Email provider unconfigured
+          description: Email provider unconfigured or upstream Resend delivery failed (`EMAIL_PROVIDER_UNCONFIGURED` / `EMAIL_DELIVERY_FAILED`)
   /client/auth/verify-email:
     post:
       summary: Verify Client Email & Safely Link Existing Customer Record
@@ -554,11 +592,21 @@ paths:
           description: Invalid or expired refresh token
   /client/auth/logout:
     post:
-      summary: Client Logout & Session Revocation
+      summary: Client Logout & Single-Device or All-Devices Session Revocation
       tags: [Client Authentication]
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                refreshToken: { type: string }
+                allDevices: { type: boolean, default: false }
       responses:
         '200':
-          description: Logged out and session revoked
+          description: Logged out (`allDevices`, `scope` [`single_device` | `all_devices`], `sessionsRevoked`)
+        '401':
+          description: Unauthorized (e.g. `allDevices: true` without authenticated client session)
   /client/auth/me:
     get:
       summary: Get Current Authenticated Client Profile
@@ -638,16 +686,18 @@ paths:
           application/json:
             schema:
               type: object
-              required: [token, password, confirmPassword]
+              required: [token, confirmPassword]
+              description: Provide either `password` or `newPassword` along with matching `confirmPassword`.
               properties:
                 token: { type: string }
                 password: { type: string, minLength: 8 }
+                newPassword: { type: string, minLength: 8 }
                 confirmPassword: { type: string, minLength: 8 }
       responses:
         '200':
           description: Password reset and existing sessions revoked
         '400':
-          description: Invalid, expired, or used token or weak password
+          description: Invalid, expired, or used token, missing confirmation, or weak password
   /client/auth/deactivate:
     post:
       summary: Deactivate Current Client Account
