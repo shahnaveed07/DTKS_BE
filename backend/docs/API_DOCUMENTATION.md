@@ -24,7 +24,7 @@
 | Method | Endpoint | Purpose | Success Status | Failure Status |
 | :--- | :--- | :--- | :--- | :--- |
 | `GET` | `/api/v1/health` | **Liveness Check** — Verifies the Worker is running without touching D1, R2, seeding, or DB rate limiting | `200 OK` (`status: "healthy"`) | N/A |
-| `GET` | `/api/v1/ready` | **Readiness Check** — Verifies D1 binding, D1 connection, all 17 schema tables, and R2 `ASSETS_BUCKET` binding | `200 OK` (`status: "ready"`, `database: "connected"`, `schema: "valid"`, `storage: "available"`) | `503 Service Unavailable` (`status: "not_ready"`) |
+| `GET` | `/api/v1/ready` | **Readiness Check** — Verifies D1 binding, D1 connection, all 18 schema tables, and R2 `ASSETS_BUCKET` binding | `200 OK` (`status: "ready"`, `database: "connected"`, `schema: "valid"`, `storage: "available"`) | `503 Service Unavailable` (`status: "not_ready"`) |
 
 
 ---
@@ -188,6 +188,47 @@ Revokes a single `refreshToken` (`allDevices: false`, `scope: "single_device"`) 
   }
   ```
 - **Behavior:** Validates single-use SHA-256-hashed invitation token (48h expiry), hashes strong password, sets `is_active = 1` and `invite_accepted_at`, marks token used, and logs `ADMIN_INVITE_ACCEPTED`.
+
+#### `POST /api/v1/auth/forgot-password`
+- **Auth Required:** Public (Rate-limited: 8 req / 15 min per IP via `adminPasswordReset`)
+- **Request Body:** `{ "email": "admin@dreamtechkashmirsolutions.studio" }`
+- **Response (`200 OK`):**
+  ```json
+  {
+    "success": true,
+    "message": "If an eligible administrator account exists for that email address, a password reset email has been sent.",
+    "data": { "requested": true }
+  }
+  ```
+- **Security Behavior:**
+  - Checks Resend configuration (`RESEND_API_KEY`) before database lookup (`503 EMAIL_PROVIDER_UNCONFIGURED` if unconfigured).
+  - Only active administrators who have completed initial account setup (`is_active = 1`, not pending invite) receive a 1-hour single-use SHA-256-hashed reset token stored in `admin_auth_tokens` (`purpose = 'password_reset'`) and emailed via Resend with link `${APP_URL}/admin/reset-password?token=<rawToken>`.
+  - Revokes any prior unused `password_reset` tokens for the same admin.
+  - Returns the exact same `200 OK` payload for non-existent, inactive, and pending-invite emails (preventing account enumeration), and returns `503 EMAIL_DELIVERY_FAILED` if Resend fails for an eligible admin.
+
+#### `POST /api/v1/auth/reset-password`
+- **Auth Required:** Public (Rate-limited: 8 req / 15 min per IP via `adminPasswordReset`)
+- **Request Body:**
+  ```json
+  {
+    "token": "<rawResetToken>",
+    "newPassword": "NewStrongAdmin#2026!",
+    "confirmPassword": "NewStrongAdmin#2026!"
+  }
+  ```
+  *(Also accepts `password` as an alias for `newPassword`.)*
+- **Response (`200 OK`):**
+  ```json
+  {
+    "success": true,
+    "message": "Administrator password has been reset successfully. You can now sign in with your new password.",
+    "data": { "reset": true }
+  }
+  ```
+- **Security Behavior:**
+  - Validates strong password policy + matching `confirmPassword`, hashes token with SHA-256, and queries `admin_auth_tokens` exclusively (`client` tokens from `customer_auth_tokens` are rejected).
+  - Rejects invalid (`400 INVALID_RESET_TOKEN`), expired (`400 RESET_TOKEN_EXPIRED`), previously used/revoked (`400 RESET_TOKEN_USED`), inactive (`403 ACCOUNT_DEACTIVATED`), or pending-invite (`403 INVITE_PENDING`) states.
+  - Atomically claims the token (`used_at`) to prevent concurrent double-consumption, updates `admins.password_hash` (`$pbkdf2-sha512$v=1$i=100000$...`), increments `admins.token_version` (immediately invalidating existing access JWTs), revokes all active `refresh_sessions`, logs `ADMIN_PASSWORD_RESET_COMPLETED`, and dispatches a non-blocking security alert email.
 
 ---
 

@@ -472,6 +472,8 @@ describe('DTKS API Contract Parity & Production Security Hardening Suite', () =>
       ['PATCH', '/auth/profile'],
       ['PUT', '/auth/profile'],
       ['POST', '/auth/change-password'],
+      ['POST', '/auth/forgot-password'],
+      ['POST', '/auth/reset-password'],
       ['GET', '/admin/accounts'],
       ['POST', '/admin/accounts'],
       ['POST', '/admin/accounts/{id}/resend-invite'],

@@ -18,7 +18,7 @@ backend/
 │   ├── routes/
 │   │   └── router.js             # REST API router (/api/v1/*) with granular RBAC
 │   ├── controllers/
-│   │   ├── authController.js          # Admin login, logout, token refresh, profile, password change & hash migration
+│   │   ├── authController.js          # Admin login, logout, token refresh, profile, password reset/change & hash migration
 │   │   ├── adminAccountsController.js # Super-admin account management, invite creation/acceptance, status & session revocation
 │   │   ├── clientAuthController.js    # Client registration, email verification, customer linking, login, refresh & password reset
 │   │   ├── clientPortalController.js  # Strictly client-scoped orders, quotations & active projects
@@ -53,11 +53,13 @@ backend/
 │   ├── 0001_initial_schema.sql                          # 13 core D1 tables, foreign keys, CHECK constraints & indexes
 │   ├── 0002_seed_data.sql                               # Non-destructive initial site settings migration (INSERT OR IGNORE)
 │   ├── 0003_admin_accounts_and_client_auth.sql          # Additive admin invite/revocation columns + 4 client/invite tables
-│   └── 0004_client_legal_acceptance_and_security_fixes.sql # Client legal acceptance persistence & composite security indexes
+│   ├── 0004_client_legal_acceptance_and_security_fixes.sql # Client legal acceptance persistence & composite security indexes
+│   └── 0005_admin_password_reset.sql                    # Admin password reset tokens (`admin_auth_tokens`) & indexes
 ├── tests/
-│   ├── backend.test.js                # 19 core API security, RBAC, CRUD, R2 & fault-handling tests
-│   ├── auth_and_accounts.test.js      # 14 admin account management, client auth, linking & isolation tests
-│   └── contract_and_security.test.js  # 7 frontend contract parity, CORS, atomic batch & OpenAPI parity tests
+│   ├── backend.test.js                # Core API security, RBAC, CRUD, R2 & fault-handling tests
+│   ├── auth_and_accounts.test.js      # Admin account management, client auth, linking & isolation tests
+│   ├── admin_password_reset.test.js   # Admin forgot/reset password, anti-enumeration, concurrency & isolation tests
+│   └── contract_and_security.test.js  # Frontend contract parity, CORS, atomic batch & OpenAPI parity tests
 ├── docs/
 │   ├── API_DOCUMENTATION.md           # Complete REST API reference & frontend integration guide
 │   ├── openapi.yaml                   # OpenAPI 3.0.3 specification (100% route/method parity)
@@ -65,7 +67,7 @@ backend/
 │   ├── BACKEND_PRODUCTION_AUDIT.md    # Complete production-readiness audit findings & remediations
 │   ├── BACKEND_API_CONTRACT_MATRIX.md # Frontend DTKS <-> DTKS_BE API contract alignment matrix
 │   ├── BACKEND_SECURITY_REPORT.md     # Security architecture, auth, CORS, CSRF, rate-limit & R2 audit
-│   ├── DATABASE_MIGRATION_REPORT.md   # D1 migration & 17-table schema verification report
+│   ├── DATABASE_MIGRATION_REPORT.md   # D1 migration & 18-table schema verification report
 │   └── BACKEND_TEST_REPORT.md         # Complete test & verification execution report
 ├── wrangler.toml                      # Cloudflare Workers, D1, and R2 configuration
 ├── .dev.vars.example                  # Example environment variables & secrets
@@ -101,25 +103,26 @@ backend/
 
 ## 3. Relational Database Schema (Cloudflare D1)
 
-Defined across `migrations/0001_initial_schema.sql`, `migrations/0003_admin_accounts_and_client_auth.sql`, and `migrations/0004_client_legal_acceptance_and_security_fixes.sql` with 17 tables, foreign keys, `CHECK` constraints, and indexes:
+Defined across `migrations/0001_initial_schema.sql`, `migrations/0003_admin_accounts_and_client_auth.sql`, `migrations/0004_client_legal_acceptance_and_security_fixes.sql`, and `migrations/0005_admin_password_reset.sql` with 18 tables, foreign keys, `CHECK` constraints, and indexes:
 
 1. `admins` – Administrator accounts (`id`, `name`, `email`, `password_hash`, `role`, `is_active`, `token_version`, `invited_by_admin_id`, `invite_accepted_at`, `deactivated_at`, `created_at`, `updated_at`, `last_login_at`)
 2. `admin_invitations` – Single-use expiring SHA-256-hashed admin onboarding invitations (`id`, `admin_id`, `email`, `token_hash`, `invited_by_admin_id`, `expires_at`, `used_at`, `revoked_at`, `created_at`)
-3. `refresh_sessions` – Hashed admin refresh token sessions (`id`, `admin_id`, `refresh_token_hash`, `user_agent`, `ip_address`, `expires_at`, `revoked_at`, `created_at`)
-4. `customers` – Customer profile records (`id`, `full_name`, `email`, `phone`, `city`, `business_name`, `created_at`, `updated_at`)
-5. `customer_accounts` – Client authentication accounts (`id`, `customer_id`, `full_name`, `email`, `phone`, `city`, `business_name`, `password_hash`, `is_email_verified`, `email_verified_at`, `is_active`, `deactivated_at`, `token_version`, `terms_accepted`, `terms_accepted_at`, `terms_version`, `privacy_accepted`, `privacy_accepted_at`, `privacy_version`, `legal_accepted_ip`, `last_login_at`, `created_at`, `updated_at`)
-6. `customer_refresh_sessions` – Hashed client refresh token sessions (`id`, `customer_account_id`, `refresh_token_hash`, `user_agent`, `ip_address`, `expires_at`, `revoked_at`, `created_at`)
-7. `customer_auth_tokens` – Single-use expiring SHA-256-hashed verification and password-reset tokens (`id`, `customer_account_id`, `purpose`, `token_hash`, `expires_at`, `used_at`, `revoked_at`, `created_at`)
-8. `services` – Website services (`id`, `title`, `slug`, `description`, `features`, `image`, `price`, `is_active`, `display_order`, `created_at`, `updated_at`, plus metadata columns)
-9. `packages` – Service pricing packages (`id`, `name`, `description`, `price`, `features`, `service_id`, `is_active`, `display_order`, `created_at`, `updated_at`, plus scope columns)
-10. `portfolio` – Website showcase items (`id`, `project_title`, `slug`, `description`, `category`, `thumbnail`, `images`, `project_url`, `is_published`, `display_order`, `created_at`, `updated_at`)
-11. `orders` – Customer website orders (`id`, `order_number`, `customer_id`, `service_id`, `package_id`, `customer_name`, `customer_email`, `customer_phone`, `project_description`, `budget`, `status`, `admin_notes`, `created_at`, `updated_at`, plus scope & quotation columns)
-12. `order_items` – Order line items (`id`, `order_id`, `item_type`, `title`, `description`, `quantity`, `unit_price`, `currency`, `created_at`)
-13. `order_status_history` – Audit trail of order status transitions (`id`, `order_id`, `previous_status`, `new_status`, `changed_by_admin_id`, `notes`, `created_at`)
-14. `contact_messages` – Customer inquiries (`id`, `name`, `email`, `phone`, `subject`, `message`, `status`, `admin_notes`, `created_at`, `updated_at`)
-15. `site_settings` – Key-value JSON site configuration (`setting_key`, `setting_value`, `updated_at`, `updated_by_admin_id`)
-16. `activity_logs` – Admin & client security audit & email delivery logs (`id`, `admin_id`, `action`, `entity_type`, `entity_id`, `details`, `ip_address`, `timestamp`)
-17. `rate_limits` – Distributed sliding-window rate limit counters (`rate_key`, `window_start`, `request_count`, `expires_at`)
+3. `admin_auth_tokens` – Single-use expiring SHA-256-hashed administrator password reset tokens (`id`, `admin_id`, `purpose`, `token_hash`, `expires_at`, `used_at`, `revoked_at`, `created_at`)
+4. `refresh_sessions` – Hashed admin refresh token sessions (`id`, `admin_id`, `refresh_token_hash`, `user_agent`, `ip_address`, `expires_at`, `revoked_at`, `created_at`)
+5. `customers` – Customer profile records (`id`, `full_name`, `email`, `phone`, `city`, `business_name`, `created_at`, `updated_at`)
+6. `customer_accounts` – Client authentication accounts (`id`, `customer_id`, `full_name`, `email`, `phone`, `city`, `business_name`, `password_hash`, `is_email_verified`, `email_verified_at`, `is_active`, `deactivated_at`, `token_version`, `terms_accepted`, `terms_accepted_at`, `terms_version`, `privacy_accepted`, `privacy_accepted_at`, `privacy_version`, `legal_accepted_ip`, `last_login_at`, `created_at`, `updated_at`)
+7. `customer_refresh_sessions` – Hashed client refresh token sessions (`id`, `customer_account_id`, `refresh_token_hash`, `user_agent`, `ip_address`, `expires_at`, `revoked_at`, `created_at`)
+8. `customer_auth_tokens` – Single-use expiring SHA-256-hashed verification and password-reset tokens (`id`, `customer_account_id`, `purpose`, `token_hash`, `expires_at`, `used_at`, `revoked_at`, `created_at`)
+9. `services` – Website services (`id`, `title`, `slug`, `description`, `features`, `image`, `price`, `is_active`, `display_order`, `created_at`, `updated_at`, plus metadata columns)
+10. `packages` – Service pricing packages (`id`, `name`, `description`, `price`, `features`, `service_id`, `is_active`, `display_order`, `created_at`, `updated_at`, plus scope columns)
+11. `portfolio` – Website showcase items (`id`, `project_title`, `slug`, `description`, `category`, `thumbnail`, `images`, `project_url`, `is_published`, `display_order`, `created_at`, `updated_at`)
+12. `orders` – Customer website orders (`id`, `order_number`, `customer_id`, `service_id`, `package_id`, `customer_name`, `customer_email`, `customer_phone`, `project_description`, `budget`, `status`, `admin_notes`, `created_at`, `updated_at`, plus scope & quotation columns)
+13. `order_items` – Order line items (`id`, `order_id`, `item_type`, `title`, `description`, `quantity`, `unit_price`, `currency`, `created_at`)
+14. `order_status_history` – Audit trail of order status transitions (`id`, `order_id`, `previous_status`, `new_status`, `changed_by_admin_id`, `notes`, `created_at`)
+15. `contact_messages` – Customer inquiries (`id`, `name`, `email`, `phone`, `subject`, `message`, `status`, `admin_notes`, `created_at`, `updated_at`)
+16. `site_settings` – Key-value JSON site configuration (`setting_key`, `setting_value`, `updated_at`, `updated_by_admin_id`)
+17. `activity_logs` – Admin & client security audit & email delivery logs (`id`, `admin_id`, `action`, `entity_type`, `entity_id`, `details`, `ip_address`, `timestamp`)
+18. `rate_limits` – Distributed sliding-window rate limit counters (`rate_key`, `window_start`, `request_count`, `expires_at`)
 
 ---
 
@@ -132,7 +135,7 @@ cp backend/.dev.vars.example backend/.dev.vars
 ```
 
 ### 4.2 Run Automated Backend Test Suite
-From either the repository root or `backend/` (40 automated tests across 3 suites):
+From either the repository root or `backend/` (across 4 suites):
 ```bash
 npm test
 # or

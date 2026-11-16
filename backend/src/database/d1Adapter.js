@@ -234,6 +234,7 @@ export function createNodeWorkerEnv({
     path.join(migrationsDir, '0002_seed_data.sql'),
     path.join(migrationsDir, '0003_admin_accounts_and_client_auth.sql'),
     path.join(migrationsDir, '0004_client_legal_acceptance_and_security_fixes.sql'),
+    path.join(migrationsDir, '0005_admin_password_reset.sql'),
   ];
 
   const db = new LocalD1Database(dbPath, migrationFiles);

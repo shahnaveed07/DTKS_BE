@@ -16,7 +16,7 @@ This guide covers deploying the **DreamTech Kashmir Solutions (DTKS)** standalon
 
 ## 2. Apply D1 Database Migrations (Safe & Non-Destructive)
 
-Apply the additive D1 migrations (`0001_initial_schema.sql`, `0002_seed_data.sql`, `0003_admin_accounts_and_client_auth.sql`, and `0004_client_legal_acceptance_and_security_fixes.sql` — 17 tables total including `admin_invitations`, `customer_accounts`, `customer_refresh_sessions`, and `customer_auth_tokens`) to the existing `dtks-production-db` (`be0ce24a-0151-412f-b308-1271bb62abba`):
+Apply the additive D1 migrations (`0001_initial_schema.sql`, `0002_seed_data.sql`, `0003_admin_accounts_and_client_auth.sql`, `0004_client_legal_acceptance_and_security_fixes.sql`, and `0005_admin_password_reset.sql` — 18 tables total including `admin_invitations`, `admin_auth_tokens`, `customer_accounts`, `customer_refresh_sessions`, and `customer_auth_tokens`) to the existing `dtks-production-db` (`be0ce24a-0151-412f-b308-1271bb62abba`):
 
 ```bash
 cd backend
@@ -50,7 +50,7 @@ npx wrangler secret put INITIAL_ADMIN_PASSWORD
 npx wrangler secret put RESEND_API_KEY
 ```
 
-> **Important:** Make sure the domain in `EMAIL_FROM_ADDRESS` (`notifications@dreamtechkashmirsolutions.studio`) is verified in your Resend account, and `APP_URL` is configured (`https://dreamtechkashmirsolutions.studio` in `wrangler.toml`) so verification, password reset, and admin invite links resolve to the correct frontend routes (`/verify-email?token=...`, `/reset-password?token=...`, `/admin/accept-invite?token=...`).
+> **Important:** Make sure the domain in `EMAIL_FROM_ADDRESS` (`notifications@dreamtechkashmirsolutions.studio`) is verified in your Resend account, and `APP_URL` is configured (`https://dreamtechkashmirsolutions.studio` in `wrangler.toml`) so verification, password reset, and admin invite links resolve to the correct frontend routes (`/verify-email?token=...`, `/reset-password?token=...`, `/admin/accept-invite?token=...`, `/admin/reset-password?token=...`).
 
 ---
 
@@ -97,7 +97,7 @@ Expected `200 OK`:
 ```
 
 ### 5.2 Readiness Check (`GET /api/v1/ready`)
-Verifies D1 database binding, D1 connection, all 17 required schema tables, and R2 storage binding:
+Verifies D1 database binding, D1 connection, all 18 required schema tables, and R2 storage binding:
 ```bash
 curl -i https://dtks-be.snave9401.workers.dev/api/v1/ready
 curl -i https://api.dreamtechkashmirsolutions.studio/api/v1/ready

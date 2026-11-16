@@ -7,12 +7,25 @@ import {
   generateRandomToken,
   sha256Hex,
 } from '../utils/crypto.js';
-import { PENDING_INVITE_PASSWORD_SENTINEL } from '../config/constants.js';
+import {
+  ADMIN_PASSWORD_RESET_EXPIRY_SECONDS,
+  PENDING_INVITE_PASSWORD_SENTINEL,
+} from '../config/constants.js';
 import { successResponse, errorResponse, parseJsonBody } from '../utils/response.js';
-import { validateLoginInput, validateChangePasswordInput } from '../validators/schemas.js';
+import {
+  validateLoginInput,
+  validateChangePasswordInput,
+  validateForgotPasswordInput,
+  validateResetPasswordInput,
+} from '../validators/schemas.js';
 import { getJwtSecret } from '../middleware/authMiddleware.js';
 import { getClientIp } from '../middleware/rateLimiter.js';
 import { logAdminActivity } from '../services/auditService.js';
+import {
+  isEmailProviderConfigured,
+  sendAdminPasswordResetEmail,
+  sendAdminSecurityNotificationEmail,
+} from '../services/emailService.js';
 
 function getAccessExpiresSeconds(env) {
   return (
@@ -30,6 +43,13 @@ function getRefreshExpiresSeconds(env) {
       10
     ) || 604800
   );
+}
+
+function getAdminResetExpirySeconds(env = {}) {
+  const configured = Number.parseInt(String(env?.ADMIN_PASSWORD_RESET_EXPIRY_SECONDS || ''), 10);
+  return Number.isFinite(configured) && configured > 0
+    ? configured
+    : ADMIN_PASSWORD_RESET_EXPIRY_SECONDS;
 }
 
 function mapAdminResponse(row, lastLoginOverride = null) {
@@ -162,7 +182,7 @@ export async function loginAdmin(request, env) {
       admin.id,
       refreshTokenHash,
       (request.headers.get('User-Agent') || '').slice(0, 255),
-      getClientIp(request),
+      getClientIp(request, env),
       expiresAt,
       now
     )
@@ -373,7 +393,7 @@ export async function refreshAdminToken(request, env) {
       admin.id,
       newRefreshTokenHash,
       (request.headers.get('User-Agent') || '').slice(0, 255),
-      getClientIp(request),
+      getClientIp(request, env),
       newExpiresAt,
       now
     )
@@ -492,5 +512,243 @@ export async function updateAdminProfile(request, env, admin) {
       },
     },
     'Admin profile updated.'
+  );
+}
+
+export async function forgotAdminPassword(request, env) {
+  const body = await parseJsonBody(request);
+  const validation = validateForgotPasswordInput(body);
+  if (!validation.isValid) {
+    return errorResponse(
+      'Please provide a valid email address.',
+      400,
+      'VALIDATION_ERROR',
+      validation.errors
+    );
+  }
+
+  // Verify email provider configuration BEFORE account lookup to prevent enumeration
+  if (!isEmailProviderConfigured(env)) {
+    return errorResponse(
+      'Administrator password reset email delivery is currently unavailable.',
+      503,
+      'EMAIL_PROVIDER_UNCONFIGURED'
+    );
+  }
+
+  const { email } = validation.data;
+  const admin = await env.DB.prepare(
+    `SELECT id, name, email, password_hash, is_active, invited_by_admin_id, invite_accepted_at, deactivated_at
+     FROM admins WHERE lower(email) = lower(?)`
+  )
+    .bind(email)
+    .first();
+
+  const isEligibleAdmin = Boolean(
+    admin &&
+      admin.is_active &&
+      !admin.deactivated_at &&
+      admin.password_hash !== PENDING_INVITE_PASSWORD_SENTINEL &&
+      (!admin.invited_by_admin_id || admin.invite_accepted_at)
+  );
+
+  if (isEligibleAdmin) {
+    const now = new Date().toISOString();
+    const rawResetToken = generateRandomToken(32);
+    const resetTokenHash = await sha256Hex(rawResetToken);
+    const resetExpirySeconds = getAdminResetExpirySeconds(env);
+    const expiresAt = new Date(Date.now() + resetExpirySeconds * 1000).toISOString();
+
+    await env.DB.batch([
+      env.DB.prepare(
+        `UPDATE admin_auth_tokens
+         SET revoked_at = ?
+         WHERE admin_id = ? AND purpose = 'password_reset' AND used_at IS NULL AND revoked_at IS NULL`
+      ).bind(now, admin.id),
+      env.DB.prepare(
+        `INSERT INTO admin_auth_tokens
+         (id, admin_id, purpose, token_hash, expires_at, used_at, revoked_at, created_at)
+         VALUES (?, ?, 'password_reset', ?, ?, NULL, NULL, ?)`
+      ).bind(generateRandomId('atok'), admin.id, resetTokenHash, expiresAt, now),
+    ]);
+
+    const emailResult = await sendAdminPasswordResetEmail(env, {
+      adminId: admin.id,
+      email: admin.email,
+      name: admin.name,
+      resetToken: rawResetToken,
+      expiresMinutes: Math.max(1, Math.round(resetExpirySeconds / 60)),
+    });
+
+    await logAdminActivity(env, {
+      adminId: admin.id,
+      action: 'ADMIN_PASSWORD_RESET_REQUESTED',
+      entityType: 'Admin',
+      entityId: admin.id,
+      details: `Administrator password reset requested for ${admin.email}`,
+      request,
+    });
+
+    if (!emailResult.sent) {
+      return errorResponse(
+        'Administrator password reset email could not be delivered right now. Please try again shortly.',
+        503,
+        emailResult.status === 'skipped_unconfigured'
+          ? 'EMAIL_PROVIDER_UNCONFIGURED'
+          : 'EMAIL_DELIVERY_FAILED',
+        {
+          resetEmailSent: false,
+          deliveryStatus: emailResult.status,
+        }
+      );
+    }
+  }
+
+  return successResponse(
+    { requested: true },
+    'If an eligible administrator account exists for that email address, a password reset email has been sent.'
+  );
+}
+
+export async function resetAdminPassword(request, env) {
+  const body = await parseJsonBody(request);
+  const validation = validateResetPasswordInput(body);
+  if (!validation.isValid) {
+    return errorResponse(
+      'Password reset validation failed.',
+      400,
+      'VALIDATION_ERROR',
+      validation.errors
+    );
+  }
+
+  const { token, password } = validation.data;
+  const tokenHash = await sha256Hex(token);
+  const tokenRow = await env.DB.prepare(
+    `SELECT id, admin_id, expires_at, used_at, revoked_at
+     FROM admin_auth_tokens
+     WHERE token_hash = ? AND purpose = 'password_reset'`
+  )
+    .bind(tokenHash)
+    .first();
+
+  if (!tokenRow) {
+    return errorResponse('Invalid password reset token.', 400, 'INVALID_RESET_TOKEN');
+  }
+  if (tokenRow.used_at || tokenRow.revoked_at) {
+    return errorResponse(
+      'This password reset token has already been used or revoked.',
+      400,
+      'RESET_TOKEN_USED'
+    );
+  }
+
+  const expiresMs = new Date(tokenRow.expires_at).getTime();
+  if (Number.isNaN(expiresMs) || expiresMs <= Date.now()) {
+    return errorResponse(
+      'This password reset token has expired. Please request a new password reset.',
+      400,
+      'RESET_TOKEN_EXPIRED'
+    );
+  }
+
+  const admin = await env.DB.prepare(
+    `SELECT id, name, email, password_hash, is_active, deactivated_at, invited_by_admin_id, invite_accepted_at
+     FROM admins WHERE id = ?`
+  )
+    .bind(tokenRow.admin_id)
+    .first();
+
+  if (!admin) {
+    return errorResponse('Administrator account not found.', 404, 'ADMIN_NOT_FOUND');
+  }
+  if (
+    admin.password_hash === PENDING_INVITE_PASSWORD_SENTINEL ||
+    (admin.invited_by_admin_id && !admin.invite_accepted_at)
+  ) {
+    return errorResponse(
+      'Administrator invitation is pending password setup. Please accept your invitation link first.',
+      403,
+      'INVITE_PENDING'
+    );
+  }
+  if (!admin.is_active || admin.deactivated_at) {
+    return errorResponse(
+      'This administrator account has been deactivated.',
+      403,
+      'ACCOUNT_DEACTIVATED'
+    );
+  }
+
+  const newHash = await hashPassword(password);
+  const now = new Date().toISOString();
+
+  // Atomically claim the single-use token so concurrent requests cannot double-reset
+  const claimRes = await env.DB.prepare(
+    `UPDATE admin_auth_tokens
+     SET used_at = ?
+     WHERE id = ? AND purpose = 'password_reset' AND used_at IS NULL AND revoked_at IS NULL`
+  )
+    .bind(now, tokenRow.id)
+    .run();
+
+  if (Number(claimRes?.meta?.changes || 0) !== 1) {
+    return errorResponse(
+      'This password reset token has already been used or revoked.',
+      400,
+      'RESET_TOKEN_USED'
+    );
+  }
+
+  try {
+    await env.DB.batch([
+      env.DB.prepare(
+        `UPDATE admin_auth_tokens
+         SET revoked_at = ?
+         WHERE admin_id = ? AND purpose = 'password_reset' AND id != ? AND used_at IS NULL AND revoked_at IS NULL`
+      ).bind(now, admin.id, tokenRow.id),
+      env.DB.prepare(
+        `UPDATE admins
+         SET password_hash = ?, token_version = COALESCE(token_version, 1) + 1, updated_at = ?
+         WHERE id = ?`
+      ).bind(newHash, now, admin.id),
+      env.DB.prepare(
+        'UPDATE refresh_sessions SET revoked_at = ? WHERE admin_id = ? AND revoked_at IS NULL'
+      ).bind(now, admin.id),
+    ]);
+  } catch (err) {
+    await env.DB.prepare('UPDATE admin_auth_tokens SET used_at = NULL WHERE id = ?')
+      .bind(tokenRow.id)
+      .run()
+      .catch(() => {});
+    throw err;
+  }
+
+  await logAdminActivity(env, {
+    adminId: admin.id,
+    action: 'ADMIN_PASSWORD_RESET_COMPLETED',
+    entityType: 'Admin',
+    entityId: admin.id,
+    details: `Administrator password reset completed for ${admin.email} and all active sessions revoked`,
+    request,
+  });
+
+  // Security alert notification must not cause a completed password reset to fail
+  try {
+    await sendAdminSecurityNotificationEmail(env, {
+      adminId: admin.id,
+      email: admin.email,
+      name: admin.name,
+      eventTitle: 'Your DTKS administrator password was reset',
+      eventDescription:
+        'Your DreamTech Kashmir Solutions (DTKS) administrator account password was reset using a one-time reset token and all active administrator sessions have been revoked.',
+    });
+  } catch {
+    // Non-blocking security notification
+  }
+
+  return successResponse(
+    { reset: true },
+    'Administrator password has been reset successfully. You can now sign in with your new password.'
   );
 }

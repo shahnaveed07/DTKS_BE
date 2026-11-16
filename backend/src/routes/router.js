@@ -15,6 +15,8 @@ import {
   getAuthenticatedAdmin,
   changeAdminPassword,
   updateAdminProfile,
+  forgotAdminPassword,
+  resetAdminPassword,
 } from '../controllers/authController.js';
 import {
   listAdminAccounts,
@@ -137,7 +139,7 @@ function matchPath(pattern, pathname) {
 /**
  * Evaluates production dependency readiness (`GET /api/v1/ready`):
  *   - D1 binding (`env.DB`) exists and responds to a connectivity probe
- *   - All 17 required relational tables exist in D1
+ *   - All 18 required relational tables exist in D1
  *   - R2 storage binding (`env.ASSETS_BUCKET`) is available
  * Never exposes secrets, raw SQL queries, or internal credentials.
  */
@@ -351,6 +353,24 @@ export async function handleApiRequest(request, env) {
       const auth = await authenticateAdmin(request, env, ROLES_ALL_ADMINS);
       if (!auth.authenticated) return applySecurityAndCorsHeaders(auth.response, request, env);
       response = await changeAdminPassword(request, env, auth.admin);
+      return applySecurityAndCorsHeaders(response, request, env);
+    }
+
+    if (pathname === `${API_PREFIX}/auth/forgot-password` && method === 'POST') {
+      const resetRate = await checkRateLimit(request, 'adminPasswordReset', env);
+      if (!resetRate.allowed) {
+        return applySecurityAndCorsHeaders(resetRate.response, request, env);
+      }
+      response = await forgotAdminPassword(request, env);
+      return applySecurityAndCorsHeaders(response, request, env);
+    }
+
+    if (pathname === `${API_PREFIX}/auth/reset-password` && method === 'POST') {
+      const resetRate = await checkRateLimit(request, 'adminPasswordReset', env);
+      if (!resetRate.allowed) {
+        return applySecurityAndCorsHeaders(resetRate.response, request, env);
+      }
+      response = await resetAdminPassword(request, env);
       return applySecurityAndCorsHeaders(response, request, env);
     }
 

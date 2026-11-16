@@ -107,6 +107,30 @@
               "raw": "{\n  \"token\": \"<raw-invite-token>\",\n  \"password\": \"StrongAdminPass#2026\",\n  \"confirmPassword\": \"StrongAdminPass#2026\"\n}"
             }
           }
+        },
+        {
+          "name": "Admin Forgot Password (/auth/forgot-password)",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "url": "{{baseUrl}}/auth/forgot-password",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"email\": \"admin@dreamtechkashmirsolutions.studio\"\n}"
+            }
+          }
+        },
+        {
+          "name": "Admin Reset Password (/auth/reset-password)",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "url": "{{baseUrl}}/auth/reset-password",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"token\": \"<raw-admin-reset-token>\",\n  \"newPassword\": \"NewStrongAdminPass#2026\",\n  \"confirmPassword\": \"NewStrongAdminPass#2026\"\n}"
+            }
+          }
         }
       ]
     },

@@ -20,7 +20,7 @@ One client-side integration defect exists in the **separate frontend repo** (`DT
 | Domain | Frontend Consumer (`DTKS`) | Backend Route (`DTKS_BE`) | Payload / Query / Response Contract | Status |
 | :--- | :--- | :--- | :--- | :--- |
 | **System** | `API_ENDPOINTS.health` | `GET /api/v1/health` | Independent of D1/R2; returns `{ service, status: 'healthy', version }` | Aligned |
-| **System** | `API_ENDPOINTS.ready` | `GET /api/v1/ready` | Checks D1 connection, 17 schema tables, and R2 `ASSETS_BUCKET` (`200` or `503`) | Aligned |
+| **System** | `API_ENDPOINTS.ready` | `GET /api/v1/ready` | Checks D1 connection, 18 schema tables, and R2 `ASSETS_BUCKET` (`200` or `503`) | Aligned |
 | **System** | `API_ENDPOINTS.bootstrap` | `GET /api/v1/bootstrap` | Returns `{ services, packages, maintenancePlans, addons, portfolio, settings, team, testimonials }` | Aligned |
 | **Admin Auth** | `apiClient.js` / `authService.js` | `POST /api/v1/auth/login` | `{ email, password }` -> `{ accessToken, refreshToken, csrfToken, expiresIn, admin }` | Aligned |
 | **Admin Auth** | `apiClient.js` | `POST /api/v1/auth/refresh` | `{ refreshToken }` (or cookie) -> `{ accessToken, refreshToken, csrfToken, expiresIn }` | Aligned |
@@ -29,6 +29,8 @@ One client-side integration defect exists in the **separate frontend repo** (`DT
 | **Admin Auth** | `authService.js` | `PATCH /api/v1/auth/profile` | `{ name }` -> `{ admin }` | Aligned |
 | **Admin Auth** | `authService.js` | `POST /api/v1/auth/change-password` | `{ currentPassword, newPassword, confirmPassword? }` -> revokes prior sessions | Aligned |
 | **Admin Auth** | `AdminAcceptInvitePage.jsx` | `POST /api/v1/auth/accept-invite` | `{ token, password, confirmPassword }` -> `{ activated: true, account }` | Aligned |
+| **Admin Auth** | Admin Forgot Password page | `POST /api/v1/auth/forgot-password` | `{ email }` -> sends 1h single-use link (`/admin/reset-password?token=...`); uniform `200` anti-enumeration | Aligned |
+| **Admin Auth** | Admin Reset Password page | `POST /api/v1/auth/reset-password` | `{ token, newPassword \| password, confirmPassword }` -> `{ reset: true }`; bumps `token_version` & revokes `refresh_sessions` | Aligned |
 | **Admin Accounts** | `authService.js` / `AdminAccountsPage.jsx` | `GET /api/v1/admin/accounts` | Supports `status=all\|active\|inactive\|pending\|expired`, `role`, `search`, `page`, `limit`; emits `invitePending`, `inviteExpiresAt`, `inviteExpired`, `activeSessions`, `activeSessionCount` | Aligned |
 | **Admin Accounts** | `authService.js` | `GET /api/v1/admin/accounts/:id` | Returns account details + `activeSessions`, `inviteExpiresAt`, `inviteExpired`, `recentSessions` | Aligned |
 | **Admin Accounts** | `authService.js` | `POST /api/v1/admin/accounts` | `{ name, email, role }` -> `201` with `{ account, invitationEmailSent, inviteEmailSent, inviteExpiresAt }` | Aligned |

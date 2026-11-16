@@ -38,6 +38,11 @@ export const RATE_LIMIT_POLICIES = {
     maxRequests: 8,
     message: 'Too many password reset requests. Please wait 15 minutes before trying again.',
   },
+  adminPasswordReset: {
+    windowMs: 15 * 60 * 1000, // 15 minutes
+    maxRequests: 8,
+    message: 'Too many administrator password reset requests. Please wait 15 minutes before trying again.',
+  },
   adminInvite: {
     windowMs: 15 * 60 * 1000, // 15 minutes
     maxRequests: 20,

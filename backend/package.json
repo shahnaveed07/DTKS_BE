@@ -10,6 +10,6 @@
     "deploy": "wrangler deploy",
     "db:migrate:local": "wrangler d1 migrations apply dtks-production-db --local",
     "db:migrate:prod": "wrangler d1 migrations apply dtks-production-db --remote",
-    "test": "node --test tests/backend.test.js tests/auth_and_accounts.test.js tests/contract_and_security.test.js"
+    "test": "node --test tests/backend.test.js tests/auth_and_accounts.test.js tests/admin_password_reset.test.js tests/contract_and_security.test.js"
   }
 }

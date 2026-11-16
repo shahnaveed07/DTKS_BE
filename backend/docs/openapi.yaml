@@ -223,7 +223,7 @@ paths:
           description: Worker is running and operational
   /ready:
     get:
-      summary: Infrastructure Readiness Check (Verifies D1 Connection, 17 Schema Tables & R2 Storage)
+      summary: Infrastructure Readiness Check (Verifies D1 Connection, 18 Schema Tables & R2 Storage)
       tags: [System]
       responses:
         '200':
@@ -370,6 +370,54 @@ paths:
           description: Admin account activated
         '400':
           description: Invalid, expired, or already-used token or weak password
+  /auth/forgot-password:
+    post:
+      summary: Request Administrator Password Reset Email (Public)
+      tags: [Authentication]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [email]
+              properties:
+                email: { type: string, format: email }
+      responses:
+        '200':
+          description: Uniform confirmation returned when email provider is configured (no account enumeration across active, nonexistent, inactive, or pending-invite admins)
+        '400':
+          description: Invalid email format (`VALIDATION_ERROR`)
+        '429':
+          description: Rate limit exceeded (`8` requests / `15` minutes per IP)
+        '503':
+          description: Email provider unconfigured (`EMAIL_PROVIDER_UNCONFIGURED`) or delivery failed (`EMAIL_DELIVERY_FAILED`)
+  /auth/reset-password:
+    post:
+      summary: Reset Administrator Password with Single-Use Token (Public)
+      tags: [Authentication]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [token, confirmPassword]
+              description: Provide either `newPassword` or `password` along with matching `confirmPassword`.
+              properties:
+                token: { type: string }
+                newPassword: { type: string, minLength: 8 }
+                password: { type: string, minLength: 8 }
+                confirmPassword: { type: string, minLength: 8 }
+      responses:
+        '200':
+          description: Password reset, `token_version` incremented, and all active `refresh_sessions` revoked
+        '400':
+          description: Invalid, expired, used, or revoked reset token, weak password, or mismatched confirmation
+        '403':
+          description: Administrator account is deactivated or still pending initial invitation acceptance
+        '429':
+          description: Rate limit exceeded (`8` requests / `15` minutes per IP)
   /admin/accounts:
     get:
       summary: List Admin Accounts (super_admin, admin)

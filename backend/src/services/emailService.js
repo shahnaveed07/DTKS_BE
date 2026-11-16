@@ -329,3 +329,64 @@ export async function sendAdminInvitationEmail(
     skipExampleDomains: false,
   });
 }
+
+export async function sendAdminPasswordResetEmail(
+  env,
+  { adminId, email, name, resetToken, expiresMinutes = 60 }
+) {
+  const appUrl = getAppBaseUrl(env);
+  const contactEmail = env?.ADMIN_NOTIFICATION_EMAIL || 'contact@dreamtechkashmirsolutions.studio';
+  const resetUrl = `${appUrl}/admin/reset-password?token=${encodeURIComponent(resetToken)}`;
+
+  return dispatchEmail(env, {
+    recipientEmail: email,
+    recipientType: 'admin',
+    subject: '[DTKS Admin] Reset your administrator password',
+    bodyText: [
+      `Hello ${name},`,
+      '',
+      `We received a request to reset the password for your DreamTech Kashmir Solutions (DTKS) administrator account.`,
+      `Use the single-use administrator password reset link below within ${expiresMinutes} minutes to set a new password:`,
+      '',
+      resetUrl,
+      '',
+      `Security Notice: Never share this reset link with anyone. If you did not request an administrator password reset, you can safely ignore this email (your current password remains unchanged) and notify the DTKS principal administrator at ${contactEmail}.`,
+      '',
+      `DreamTech Kashmir Solutions (DTKS)`,
+      `Website: ${appUrl}`,
+      `Contact: ${contactEmail}`,
+    ].join('\n'),
+    eventType: 'ADMIN_PASSWORD_RESET',
+    relatedEntityId: adminId,
+    skipExampleDomains: false,
+  });
+}
+
+export async function sendAdminSecurityNotificationEmail(
+  env,
+  { adminId, email, name, eventTitle, eventDescription }
+) {
+  const appUrl = getAppBaseUrl(env);
+  const contactEmail = env?.ADMIN_NOTIFICATION_EMAIL || 'contact@dreamtechkashmirsolutions.studio';
+
+  return dispatchEmail(env, {
+    recipientEmail: email,
+    recipientType: 'admin',
+    subject: `[DTKS Admin Security] ${eventTitle}`,
+    bodyText: [
+      `Hello ${name},`,
+      '',
+      eventDescription,
+      '',
+      `Timestamp: ${new Date().toISOString()}`,
+      `If you did not authorize this administrator security change, please contact the DTKS principal administrator immediately at ${contactEmail}.`,
+      '',
+      `DreamTech Kashmir Solutions (DTKS)`,
+      `Website: ${appUrl}`,
+      `Contact: ${contactEmail}`,
+    ].join('\n'),
+    eventType: 'ADMIN_SECURITY_ALERT',
+    relatedEntityId: adminId,
+    skipExampleDomains: false,
+  });
+}
