@@ -1,6 +1,9 @@
 import {
+  CLIENT_ACCESS_COOKIE_NAME,
+  CLIENT_CSRF_COOKIE_NAME,
   CLIENT_EMAIL_VERIFICATION_EXPIRY_SECONDS,
   CLIENT_PASSWORD_RESET_EXPIRY_SECONDS,
+  CLIENT_REFRESH_COOKIE_NAME,
   CURRENT_PRIVACY_VERSION,
   CURRENT_TERMS_VERSION,
 } from '../config/constants.js';
@@ -23,7 +26,19 @@ import {
   validateForgotPasswordInput,
   validateResetPasswordInput,
 } from '../validators/schemas.js';
-import { getJwtSecret } from '../middleware/authMiddleware.js';
+import {
+  appendCookiesToResponse,
+  buildClientAuthCookies,
+  clearClientAuthCookies,
+  createCsrfToken,
+  formatSetCookieHeader,
+  getJwtSecret,
+  isBearerModeRequested,
+  isHttpsRequest,
+  parseCookies,
+  validateCookieCsrf,
+} from '../middleware/authMiddleware.js';
+import { isProductionEnv } from '../config/cors.js';
 import { getClientIp } from '../middleware/rateLimiter.js';
 import { logAdminActivity } from '../services/auditService.js';
 import {
@@ -114,6 +129,31 @@ function mapClientResponse(row, lastLoginOverride = null) {
   };
 }
 
+export async function getClientCsrfToken(request, env) {
+  const cookies = parseCookies(request.headers.get('Cookie') || '');
+  const existing = cookies[CLIENT_CSRF_COOKIE_NAME];
+  const csrfToken =
+    typeof existing === 'string' && existing.length >= 32 ? existing : createCsrfToken();
+  const refreshExp = getRefreshExpiresSeconds(env);
+  const secure = isProductionEnv(env) || isHttpsRequest(request);
+  const res = successResponse(
+    {
+      csrfToken,
+      csrf_token: csrfToken,
+    },
+    'CSRF token issued.'
+  );
+  return appendCookiesToResponse(res, [
+    formatSetCookieHeader(CLIENT_CSRF_COOKIE_NAME, csrfToken, {
+      maxAge: refreshExp,
+      path: '/api/v1',
+      httpOnly: true,
+      sameSite: 'Lax',
+      secure,
+    }),
+  ]);
+}
+
 export async function registerClient(request, env) {
   const body = await parseJsonBody(request);
   const validation = validateClientRegisterInput(body);
@@ -156,7 +196,7 @@ export async function registerClient(request, env) {
   const accountId = generateRandomId('cacc');
   const termsVersion = requestedTermsVersion || env?.TERMS_VERSION || CURRENT_TERMS_VERSION;
   const privacyVersion = requestedPrivacyVersion || env?.PRIVACY_VERSION || CURRENT_PRIVACY_VERSION;
-  const acceptedIp = getClientIp(request);
+  const acceptedIp = getClientIp(request, env);
 
   const rawVerifyToken = generateRandomToken(32);
   const verifyTokenHash = await sha256Hex(rawVerifyToken);
@@ -290,49 +330,86 @@ export async function resendClientVerification(request, env) {
 
   if (account && account.is_active && !account.is_email_verified) {
     const now = new Date().toISOString();
+    const tokenId = generateRandomId('ctok');
     const rawVerifyToken = generateRandomToken(32);
     const verifyTokenHash = await sha256Hex(rawVerifyToken);
     const verifyExpirySeconds = getVerificationExpirySeconds(env);
     const expiresAt = new Date(Date.now() + verifyExpirySeconds * 1000).toISOString();
 
-    await env.DB.batch([
-      env.DB.prepare(
+    // Insert new token first without revoking existing unused tokens until delivery succeeds
+    await env.DB.prepare(
+      `INSERT INTO customer_auth_tokens
+       (id, customer_account_id, purpose, token_hash, expires_at, used_at, revoked_at, created_at)
+       VALUES (?, ?, 'email_verification', ?, ?, NULL, NULL, ?)`
+    )
+      .bind(tokenId, account.id, verifyTokenHash, expiresAt, now)
+      .run();
+
+    let emailResult = {
+      sent: false,
+      status: 'failed',
+      detailMessage: 'Unexpected error dispatching verification email.',
+    };
+    try {
+      emailResult = await sendClientVerificationEmail(env, {
+        accountId: account.id,
+        email: account.email,
+        fullName: account.full_name,
+        verificationToken: rawVerifyToken,
+        expiresHours: Math.max(1, Math.round(verifyExpirySeconds / 3600)),
+      });
+    } catch (err) {
+      emailResult = {
+        sent: false,
+        status: 'failed',
+        detailMessage: err?.message || 'Unexpected error dispatching verification email.',
+      };
+    }
+
+    if (emailResult.sent) {
+      await env.DB.prepare(
         `UPDATE customer_auth_tokens
          SET revoked_at = ?
-         WHERE customer_account_id = ? AND purpose = 'email_verification' AND used_at IS NULL AND revoked_at IS NULL`
-      ).bind(now, account.id),
-      env.DB.prepare(
-        `INSERT INTO customer_auth_tokens
-         (id, customer_account_id, purpose, token_hash, expires_at, used_at, revoked_at, created_at)
-         VALUES (?, ?, 'email_verification', ?, ?, NULL, NULL, ?)`
-      ).bind(generateRandomId('ctok'), account.id, verifyTokenHash, expiresAt, now),
-    ]);
+         WHERE customer_account_id = ? AND purpose = 'email_verification' AND id != ? AND used_at IS NULL AND revoked_at IS NULL`
+      )
+        .bind(now, account.id, tokenId)
+        .run();
 
-    const emailResult = await sendClientVerificationEmail(env, {
-      accountId: account.id,
-      email: account.email,
-      fullName: account.full_name,
-      verificationToken: rawVerifyToken,
-      expiresHours: Math.max(1, Math.round(verifyExpirySeconds / 3600)),
-    });
+      await logAdminActivity(env, {
+        adminId: null,
+        action: 'CLIENT_VERIFICATION_RESENT',
+        entityType: 'CustomerAccount',
+        entityId: account.id,
+        details: `Verification email resent for ${account.email}`,
+        request,
+      });
+    } else {
+      const revokedAt = new Date().toISOString();
+      await env.DB.prepare(
+        `UPDATE customer_auth_tokens
+         SET revoked_at = ?
+         WHERE id = ? AND purpose = 'email_verification' AND used_at IS NULL AND revoked_at IS NULL`
+      )
+        .bind(revokedAt, tokenId)
+        .run();
 
-    if (!emailResult.sent) {
-      return errorResponse(
-        'Verification email could not be delivered right now. Please try again shortly.',
-        503,
-        emailResult.status === 'skipped_unconfigured'
-          ? 'EMAIL_PROVIDER_UNCONFIGURED'
-          : 'EMAIL_DELIVERY_FAILED',
-        {
-          verificationEmailSent: false,
+      await logAdminActivity(env, {
+        adminId: null,
+        action: 'CLIENT_VERIFICATION_DELIVERY_FAILED',
+        entityType: 'CustomerAccount',
+        entityId: account.id,
+        details: JSON.stringify({
+          tokenId,
           deliveryStatus: emailResult.status,
-        }
-      );
+          note: emailResult.detailMessage,
+        }),
+        request,
+      });
     }
   }
 
   return successResponse(
-    { requested: true, verificationEmailSent: true },
+    { requested: true },
     'If an eligible unverified account exists for that email address, a verification email has been sent.'
   );
 }
@@ -378,7 +455,7 @@ export async function verifyClientEmail(request, env) {
 
   const account = await env.DB.prepare(
     `SELECT id, customer_id, full_name, email, phone, city, business_name,
-            is_email_verified, is_active
+            is_email_verified, is_active, created_at
      FROM customer_accounts WHERE id = ?`
   )
     .bind(tokenRow.customer_account_id)
@@ -393,16 +470,34 @@ export async function verifyClientEmail(request, env) {
 
   const now = new Date().toISOString();
 
-  // Atomically claim the single-use token so concurrent requests cannot double-verify
+  // Atomically claim the single-use, unrevoked, unexpired token inside SQL
   const claimRes = await env.DB.prepare(
     `UPDATE customer_auth_tokens
      SET used_at = ?
-     WHERE id = ? AND used_at IS NULL AND revoked_at IS NULL`
+     WHERE id = ?
+       AND purpose = 'email_verification'
+       AND used_at IS NULL
+       AND revoked_at IS NULL
+       AND julianday(expires_at) > julianday(?)`
   )
-    .bind(now, tokenRow.id)
+    .bind(now, tokenRow.id, now)
     .run();
 
   if (Number(claimRes?.meta?.changes || 0) !== 1) {
+    const freshToken = await env.DB.prepare(
+      'SELECT used_at, revoked_at FROM customer_auth_tokens WHERE id = ?'
+    )
+      .bind(tokenRow.id)
+      .first();
+
+    if (freshToken && !freshToken.used_at && !freshToken.revoked_at) {
+      return errorResponse(
+        'This email verification token has expired. Please request a new verification email.',
+        400,
+        'VERIFICATION_TOKEN_EXPIRED'
+      );
+    }
+
     return errorResponse(
       'This email verification token has already been used or revoked.',
       400,
@@ -448,10 +543,15 @@ export async function verifyClientEmail(request, env) {
         );
       }
 
+      // Link only pre-registration historical guest orders created before or at registration time
       statements.push(
         env.DB.prepare(
-          'UPDATE orders SET customer_id = ? WHERE customer_id IS NULL AND lower(customer_email) = lower(?)'
-        ).bind(linkedCustomerId, account.email)
+          `UPDATE orders
+           SET customer_id = ?
+           WHERE customer_id IS NULL
+             AND lower(customer_email) = lower(?)
+             AND julianday(created_at) <= julianday(?)`
+        ).bind(linkedCustomerId, account.email, account.created_at)
       );
     }
 
@@ -602,7 +702,7 @@ export async function loginClient(request, env) {
       account.id,
       refreshTokenHash,
       (request.headers.get('User-Agent') || '').slice(0, 255),
-      getClientIp(request),
+      getClientIp(request, env),
       expiresAt,
       now
     ),
@@ -617,14 +717,30 @@ export async function loginClient(request, env) {
     request,
   });
 
-  const csrfToken = generateRandomToken(16);
+  const csrfToken = createCsrfToken();
+  const bearerMode = isBearerModeRequested(request);
 
-  return successResponse(
+  if (bearerMode) {
+    return successResponse(
+      {
+        authMode: 'bearer',
+        accessToken,
+        access_token: accessToken,
+        refreshToken: rawRefreshToken,
+        refresh_token: rawRefreshToken,
+        csrfToken,
+        csrf_token: csrfToken,
+        expiresIn: accessExp,
+        expires_in: accessExp,
+        client: mapClientResponse(account, now),
+      },
+      'Authenticated successfully.'
+    );
+  }
+
+  const res = successResponse(
     {
-      accessToken,
-      access_token: accessToken,
-      refreshToken: rawRefreshToken,
-      refresh_token: rawRefreshToken,
+      authMode: 'cookie',
       csrfToken,
       csrf_token: csrfToken,
       expiresIn: accessExp,
@@ -633,26 +749,83 @@ export async function loginClient(request, env) {
     },
     'Authenticated successfully.'
   );
+
+  return appendCookiesToResponse(
+    res,
+    buildClientAuthCookies(request, env, {
+      accessToken,
+      refreshToken: rawRefreshToken,
+      csrfToken,
+      accessMaxAge: accessExp,
+      refreshMaxAge: refreshExp,
+    })
+  );
 }
 
 export async function refreshClientToken(request, env) {
+  const cookies = parseCookies(request.headers.get('Cookie') || '');
   const body = await parseJsonBody(request);
-  const rawToken =
+  const rawBodyToken =
     typeof (body.refreshToken || body.refresh_token) === 'string'
       ? (body.refreshToken || body.refresh_token).trim()
       : '';
+  const cookieToken = String(cookies[CLIENT_REFRESH_COOKIE_NAME] || '').trim();
+  const usedCookieRefresh = !rawBodyToken && Boolean(cookieToken);
+
+  if (usedCookieRefresh) {
+    const csrfOk = await validateCookieCsrf(request, cookies, CLIENT_CSRF_COOKIE_NAME);
+    if (!csrfOk) {
+      return errorResponse(
+        'CSRF token validation failed for cookie-authenticated request.',
+        403,
+        'CSRF_VALIDATION_FAILED'
+      );
+    }
+  }
+
+  const rawToken = rawBodyToken || cookieToken;
   if (!rawToken) {
     return errorResponse('Refresh token is required.', 400, 'MISSING_REFRESH_TOKEN');
   }
 
   const tokenHash = await sha256Hex(rawToken);
   const session = await env.DB.prepare(
-    'SELECT id, customer_account_id, expires_at, revoked_at FROM customer_refresh_sessions WHERE refresh_token_hash = ?'
+    'SELECT id, customer_account_id, expires_at, revoked_at, revoke_reason FROM customer_refresh_sessions WHERE refresh_token_hash = ?'
   )
     .bind(tokenHash)
     .first();
 
-  if (!session || session.revoked_at) {
+  if (!session) {
+    return errorResponse('Invalid or revoked refresh token.', 401, 'INVALID_REFRESH_TOKEN');
+  }
+
+  if (session.revoked_at) {
+    if (session.revoke_reason === 'rotated') {
+      const replayNow = new Date().toISOString();
+      await env.DB.batch([
+        env.DB.prepare(
+          "UPDATE customer_refresh_sessions SET revoked_at = ?, revoke_reason = 'replay_detected' WHERE customer_account_id = ? AND revoked_at IS NULL"
+        ).bind(replayNow, session.customer_account_id),
+        env.DB.prepare(
+          'UPDATE customer_accounts SET token_version = COALESCE(token_version, 1) + 1, updated_at = ? WHERE id = ?'
+        ).bind(replayNow, session.customer_account_id),
+      ]);
+      await logAdminActivity(env, {
+        adminId: null,
+        action: 'CLIENT_REFRESH_REPLAY_DETECTED',
+        entityType: 'CustomerAccount',
+        entityId: session.customer_account_id,
+        details: 'Detected reuse of rotated client refresh token; revoked all active client sessions.',
+        request,
+      });
+      const replayRes = errorResponse(
+        'Refresh token reuse detected. All client sessions have been revoked for security.',
+        401,
+        'REFRESH_TOKEN_REPLAY_DETECTED'
+      );
+      return appendCookiesToResponse(replayRes, clearClientAuthCookies(request, env));
+    }
+
     return errorResponse('Invalid or revoked refresh token.', 401, 'INVALID_REFRESH_TOKEN');
   }
 
@@ -690,15 +863,28 @@ export async function refreshClientToken(request, env) {
   }
 
   const now = new Date().toISOString();
-  // Atomically claim the refresh token so concurrent refreshes cannot replay it
+  // Atomically claim the refresh token with revoke_reason = 'rotated' for replay detection
   const claimSession = await env.DB.prepare(
-    'UPDATE customer_refresh_sessions SET revoked_at = ? WHERE id = ? AND revoked_at IS NULL'
+    "UPDATE customer_refresh_sessions SET revoked_at = ?, revoke_reason = 'rotated' WHERE id = ? AND revoked_at IS NULL"
   )
     .bind(now, session.id)
     .run();
 
   if (Number(claimSession?.meta?.changes || 0) !== 1) {
-    return errorResponse('Invalid or revoked refresh token.', 401, 'INVALID_REFRESH_TOKEN');
+    await env.DB.batch([
+      env.DB.prepare(
+        "UPDATE customer_refresh_sessions SET revoked_at = ?, revoke_reason = 'replay_detected' WHERE customer_account_id = ? AND revoked_at IS NULL"
+      ).bind(now, session.customer_account_id),
+      env.DB.prepare(
+        'UPDATE customer_accounts SET token_version = COALESCE(token_version, 1) + 1, updated_at = ? WHERE id = ?'
+      ).bind(now, session.customer_account_id),
+    ]);
+    const replayRes = errorResponse(
+      'Refresh token reuse detected. All client sessions have been revoked for security.',
+      401,
+      'REFRESH_TOKEN_REPLAY_DETECTED'
+    );
+    return appendCookiesToResponse(replayRes, clearClientAuthCookies(request, env));
   }
 
   const accessExp = getAccessExpiresSeconds(env);
@@ -733,20 +919,36 @@ export async function refreshClientToken(request, env) {
       account.id,
       newRefreshTokenHash,
       (request.headers.get('User-Agent') || '').slice(0, 255),
-      getClientIp(request),
+      getClientIp(request, env),
       newExpiresAt,
       now
     )
     .run();
 
-  const csrfToken = generateRandomToken(16);
+  const csrfToken = createCsrfToken();
+  const bearerMode = isBearerModeRequested(request);
 
-  return successResponse(
+  if (bearerMode) {
+    return successResponse(
+      {
+        authMode: 'bearer',
+        accessToken: newAccessToken,
+        access_token: newAccessToken,
+        refreshToken: newRawRefreshToken,
+        refresh_token: newRawRefreshToken,
+        csrfToken,
+        csrf_token: csrfToken,
+        expiresIn: accessExp,
+        expires_in: accessExp,
+        client: mapClientResponse(account),
+      },
+      'Session token refreshed.'
+    );
+  }
+
+  const res = successResponse(
     {
-      accessToken: newAccessToken,
-      access_token: newAccessToken,
-      refreshToken: newRawRefreshToken,
-      refresh_token: newRawRefreshToken,
+      authMode: 'cookie',
       csrfToken,
       csrf_token: csrfToken,
       expiresIn: accessExp,
@@ -755,9 +957,38 @@ export async function refreshClientToken(request, env) {
     },
     'Session token refreshed.'
   );
+
+  return appendCookiesToResponse(
+    res,
+    buildClientAuthCookies(request, env, {
+      accessToken: newAccessToken,
+      refreshToken: newRawRefreshToken,
+      csrfToken,
+      accessMaxAge: accessExp,
+      refreshMaxAge: refreshExp,
+    })
+  );
 }
 
 export async function logoutClient(request, env, currentClient) {
+  const cookies = parseCookies(request.headers.get('Cookie') || '');
+  const authHeader = request.headers.get('Authorization') || '';
+  const hasBearer = authHeader.startsWith('Bearer ');
+  const hasClientCookie = Boolean(
+    cookies[CLIENT_ACCESS_COOKIE_NAME] || cookies[CLIENT_REFRESH_COOKIE_NAME]
+  );
+
+  if (!hasBearer && hasClientCookie) {
+    const csrfOk = await validateCookieCsrf(request, cookies, CLIENT_CSRF_COOKIE_NAME);
+    if (!csrfOk) {
+      return errorResponse(
+        'CSRF token validation failed for cookie-authenticated request.',
+        403,
+        'CSRF_VALIDATION_FAILED'
+      );
+    }
+  }
+
   const body = await parseJsonBody(request);
   const rawAllDevices =
     body.allDevices !== undefined ? body.allDevices : body.all_devices;
@@ -769,10 +1000,11 @@ export async function logoutClient(request, env, currentClient) {
   }
 
   const allDevices = rawAllDevices === true;
-  const rawToken =
+  const rawBodyToken =
     typeof (body.refreshToken || body.refresh_token) === 'string'
       ? (body.refreshToken || body.refresh_token).trim()
       : '';
+  const rawToken = rawBodyToken || String(cookies[CLIENT_REFRESH_COOKIE_NAME] || '').trim();
 
   if (allDevices && !currentClient?.id) {
     return errorResponse(
@@ -798,7 +1030,7 @@ export async function logoutClient(request, env, currentClient) {
     scope = 'all_devices';
     const [revokeRes] = await env.DB.batch([
       env.DB.prepare(
-        'UPDATE customer_refresh_sessions SET revoked_at = ? WHERE customer_account_id = ? AND revoked_at IS NULL'
+        "UPDATE customer_refresh_sessions SET revoked_at = ?, revoke_reason = 'logout_all' WHERE customer_account_id = ? AND revoked_at IS NULL"
       ).bind(now, currentClient.id),
       env.DB.prepare(
         'UPDATE customer_accounts SET token_version = COALESCE(token_version, 1) + 1, updated_at = ? WHERE id = ?'
@@ -809,12 +1041,12 @@ export async function logoutClient(request, env, currentClient) {
     const hash = await sha256Hex(rawToken);
     const revokeRes = currentClient?.id
       ? await env.DB.prepare(
-          'UPDATE customer_refresh_sessions SET revoked_at = ? WHERE refresh_token_hash = ? AND customer_account_id = ? AND revoked_at IS NULL'
+          "UPDATE customer_refresh_sessions SET revoked_at = ?, revoke_reason = 'logout' WHERE refresh_token_hash = ? AND customer_account_id = ? AND revoked_at IS NULL"
         )
           .bind(now, hash, currentClient.id)
           .run()
       : await env.DB.prepare(
-          'UPDATE customer_refresh_sessions SET revoked_at = ? WHERE refresh_token_hash = ? AND revoked_at IS NULL'
+          "UPDATE customer_refresh_sessions SET revoked_at = ?, revoke_reason = 'logout' WHERE refresh_token_hash = ? AND revoked_at IS NULL"
         )
           .bind(now, hash)
           .run();
@@ -835,7 +1067,7 @@ export async function logoutClient(request, env, currentClient) {
     });
   }
 
-  return successResponse(
+  const res = successResponse(
     {
       loggedOut: true,
       allDevices: scope === 'all_devices',
@@ -846,6 +1078,8 @@ export async function logoutClient(request, env, currentClient) {
       ? 'Logged out from all devices successfully.'
       : 'Logged out successfully.'
   );
+
+  return appendCookiesToResponse(res, clearClientAuthCookies(request, env));
 }
 
 export async function getAuthenticatedClient(request, env, client) {
@@ -954,7 +1188,7 @@ export async function changeClientPassword(request, env, client) {
        WHERE id = ?`
     ).bind(newHash, now, client.id),
     env.DB.prepare(
-      'UPDATE customer_refresh_sessions SET revoked_at = ? WHERE customer_account_id = ? AND revoked_at IS NULL'
+      "UPDATE customer_refresh_sessions SET revoked_at = ?, revoke_reason = 'password_changed' WHERE customer_account_id = ? AND revoked_at IS NULL"
     ).bind(now, client.id),
   ]);
 
@@ -967,16 +1201,23 @@ export async function changeClientPassword(request, env, client) {
     request,
   });
 
-  await sendClientSecurityNotificationEmail(env, {
-    accountId: row.id,
-    email: row.email,
-    fullName: row.full_name,
-    eventTitle: 'Your DTKS password was changed',
-    eventDescription:
-      'Your DreamTech Kashmir Solutions client account password was recently updated and all active sessions were signed out.',
-  });
+  try {
+    await sendClientSecurityNotificationEmail(env, {
+      accountId: row.id,
+      email: row.email,
+      fullName: row.full_name,
+      eventTitle: 'Your DTKS password was changed',
+      eventDescription:
+        'Your DreamTech Kashmir Solutions client account password was recently updated and all active sessions were signed out.',
+    });
+  } catch {
+    // Non-blocking security notification
+  }
 
-  return successResponse({ updated: true }, 'Password changed successfully.');
+  return appendCookiesToResponse(
+    successResponse({ updated: true }, 'Password changed successfully.'),
+    clearClientAuthCookies(request, env)
+  );
 }
 
 export async function forgotClientPassword(request, env) {
@@ -1004,53 +1245,81 @@ export async function forgotClientPassword(request, env) {
 
   if (account && account.is_active && account.is_email_verified) {
     const now = new Date().toISOString();
+    const tokenId = generateRandomId('ctok');
     const rawResetToken = generateRandomToken(32);
     const resetTokenHash = await sha256Hex(rawResetToken);
     const resetExpirySeconds = getResetExpirySeconds(env);
     const expiresAt = new Date(Date.now() + resetExpirySeconds * 1000).toISOString();
 
-    await env.DB.batch([
-      env.DB.prepare(
+    // Insert new token first without revoking existing unused tokens until delivery succeeds
+    await env.DB.prepare(
+      `INSERT INTO customer_auth_tokens
+       (id, customer_account_id, purpose, token_hash, expires_at, used_at, revoked_at, created_at)
+       VALUES (?, ?, 'password_reset', ?, ?, NULL, NULL, ?)`
+    )
+      .bind(tokenId, account.id, resetTokenHash, expiresAt, now)
+      .run();
+
+    let emailResult = {
+      sent: false,
+      status: 'failed',
+      detailMessage: 'Unexpected error dispatching password reset email.',
+    };
+    try {
+      emailResult = await sendClientPasswordResetEmail(env, {
+        accountId: account.id,
+        email: account.email,
+        fullName: account.full_name,
+        resetToken: rawResetToken,
+        expiresMinutes: Math.max(1, Math.round(resetExpirySeconds / 60)),
+      });
+    } catch (err) {
+      emailResult = {
+        sent: false,
+        status: 'failed',
+        detailMessage: err?.message || 'Unexpected error dispatching password reset email.',
+      };
+    }
+
+    if (emailResult.sent) {
+      await env.DB.prepare(
         `UPDATE customer_auth_tokens
          SET revoked_at = ?
-         WHERE customer_account_id = ? AND purpose = 'password_reset' AND used_at IS NULL AND revoked_at IS NULL`
-      ).bind(now, account.id),
-      env.DB.prepare(
-        `INSERT INTO customer_auth_tokens
-         (id, customer_account_id, purpose, token_hash, expires_at, used_at, revoked_at, created_at)
-         VALUES (?, ?, 'password_reset', ?, ?, NULL, NULL, ?)`
-      ).bind(generateRandomId('ctok'), account.id, resetTokenHash, expiresAt, now),
-    ]);
+         WHERE customer_account_id = ? AND purpose = 'password_reset' AND id != ? AND used_at IS NULL AND revoked_at IS NULL`
+      )
+        .bind(now, account.id, tokenId)
+        .run();
 
-    const emailResult = await sendClientPasswordResetEmail(env, {
-      accountId: account.id,
-      email: account.email,
-      fullName: account.full_name,
-      resetToken: rawResetToken,
-      expiresMinutes: Math.max(1, Math.round(resetExpirySeconds / 60)),
-    });
+      await logAdminActivity(env, {
+        adminId: null,
+        action: 'CLIENT_PASSWORD_RESET_REQUESTED',
+        entityType: 'CustomerAccount',
+        entityId: account.id,
+        details: `Password reset requested for ${account.email}`,
+        request,
+      });
+    } else {
+      const revokedAt = new Date().toISOString();
+      await env.DB.prepare(
+        `UPDATE customer_auth_tokens
+         SET revoked_at = ?
+         WHERE id = ? AND purpose = 'password_reset' AND used_at IS NULL AND revoked_at IS NULL`
+      )
+        .bind(revokedAt, tokenId)
+        .run();
 
-    await logAdminActivity(env, {
-      adminId: null,
-      action: 'CLIENT_PASSWORD_RESET_REQUESTED',
-      entityType: 'CustomerAccount',
-      entityId: account.id,
-      details: `Password reset requested for ${account.email}`,
-      request,
-    });
-
-    if (!emailResult.sent) {
-      return errorResponse(
-        'Password reset email could not be delivered right now. Please try again shortly.',
-        503,
-        emailResult.status === 'skipped_unconfigured'
-          ? 'EMAIL_PROVIDER_UNCONFIGURED'
-          : 'EMAIL_DELIVERY_FAILED',
-        {
-          resetEmailSent: false,
+      await logAdminActivity(env, {
+        adminId: null,
+        action: 'CLIENT_PASSWORD_RESET_DELIVERY_FAILED',
+        entityType: 'CustomerAccount',
+        entityId: account.id,
+        details: JSON.stringify({
+          tokenId,
           deliveryStatus: emailResult.status,
-        }
-      );
+          note: emailResult.detailMessage,
+        }),
+        request,
+      });
     }
   }
 
@@ -1123,16 +1392,34 @@ export async function resetClientPassword(request, env) {
   const newHash = await hashPassword(password);
   const now = new Date().toISOString();
 
-  // Atomically claim the reset token so concurrent requests cannot double-reset
+  // Atomically claim the single-use, unrevoked, unexpired reset token inside SQL
   const claimRes = await env.DB.prepare(
     `UPDATE customer_auth_tokens
      SET used_at = ?
-     WHERE id = ? AND used_at IS NULL AND revoked_at IS NULL`
+     WHERE id = ?
+       AND purpose = 'password_reset'
+       AND used_at IS NULL
+       AND revoked_at IS NULL
+       AND julianday(expires_at) > julianday(?)`
   )
-    .bind(now, tokenRow.id)
+    .bind(now, tokenRow.id, now)
     .run();
 
   if (Number(claimRes?.meta?.changes || 0) !== 1) {
+    const freshToken = await env.DB.prepare(
+      'SELECT used_at, revoked_at FROM customer_auth_tokens WHERE id = ?'
+    )
+      .bind(tokenRow.id)
+      .first();
+
+    if (freshToken && !freshToken.used_at && !freshToken.revoked_at) {
+      return errorResponse(
+        'This password reset token has expired. Please request a new password reset.',
+        400,
+        'RESET_TOKEN_EXPIRED'
+      );
+    }
+
     return errorResponse(
       'This password reset token has already been used or revoked.',
       400,
@@ -1153,7 +1440,7 @@ export async function resetClientPassword(request, env) {
          WHERE id = ?`
       ).bind(newHash, now, account.id),
       env.DB.prepare(
-        'UPDATE customer_refresh_sessions SET revoked_at = ? WHERE customer_account_id = ? AND revoked_at IS NULL'
+        "UPDATE customer_refresh_sessions SET revoked_at = ?, revoke_reason = 'password_reset' WHERE customer_account_id = ? AND revoked_at IS NULL"
       ).bind(now, account.id),
     ]);
   } catch (err) {
@@ -1173,14 +1460,18 @@ export async function resetClientPassword(request, env) {
     request,
   });
 
-  await sendClientSecurityNotificationEmail(env, {
-    accountId: account.id,
-    email: account.email,
-    fullName: account.full_name,
-    eventTitle: 'Your DTKS password has been reset',
-    eventDescription:
-      'Your DreamTech Kashmir Solutions client account password was reset using a one-time reset token and all existing sessions were revoked.',
-  });
+  try {
+    await sendClientSecurityNotificationEmail(env, {
+      accountId: account.id,
+      email: account.email,
+      fullName: account.full_name,
+      eventTitle: 'Your DTKS password has been reset',
+      eventDescription:
+        'Your DreamTech Kashmir Solutions client account password was reset using a one-time reset token and all existing sessions were revoked.',
+    });
+  } catch {
+    // Non-blocking security notification
+  }
 
   return successResponse(
     { reset: true },
@@ -1227,7 +1518,7 @@ export async function deactivateClientAccount(request, env, client) {
        WHERE id = ?`
     ).bind(now, now, client.id),
     env.DB.prepare(
-      'UPDATE customer_refresh_sessions SET revoked_at = ? WHERE customer_account_id = ? AND revoked_at IS NULL'
+      "UPDATE customer_refresh_sessions SET revoked_at = ?, revoke_reason = 'account_deactivated' WHERE customer_account_id = ? AND revoked_at IS NULL"
     ).bind(now, client.id),
   ]);
 
@@ -1240,17 +1531,24 @@ export async function deactivateClientAccount(request, env, client) {
     request,
   });
 
-  await sendClientSecurityNotificationEmail(env, {
-    accountId: row.id,
-    email: row.email,
-    fullName: row.full_name,
-    eventTitle: 'Your DTKS client account was deactivated',
-    eventDescription:
-      'Your DreamTech Kashmir Solutions client account has been deactivated and all active sessions have been signed out.',
-  });
+  try {
+    await sendClientSecurityNotificationEmail(env, {
+      accountId: row.id,
+      email: row.email,
+      fullName: row.full_name,
+      eventTitle: 'Your DTKS client account was deactivated',
+      eventDescription:
+        'Your DreamTech Kashmir Solutions client account has been deactivated and all active sessions have been signed out.',
+    });
+  } catch {
+    // Non-blocking security notification
+  }
 
-  return successResponse(
-    { deactivated: true },
-    'Your client account has been deactivated and all active sessions have been revoked.'
+  return appendCookiesToResponse(
+    successResponse(
+      { deactivated: true },
+      'Your client account has been deactivated and all active sessions have been revoked.'
+    ),
+    clearClientAuthCookies(request, env)
   );
 }

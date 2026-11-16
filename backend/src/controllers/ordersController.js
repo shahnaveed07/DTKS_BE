@@ -1,9 +1,14 @@
-import { generateRandomId } from '../utils/crypto.js';
+import { generateRandomId, generateRandomToken, sha256Hex } from '../utils/crypto.js';
+import { ORDER_TRACKING_TOKEN_EXPIRY_SECONDS } from '../config/constants.js';
 import { successResponse, errorResponse, parseJsonBody, sanitizeText } from '../utils/response.js';
-import { validateOrderSubmission, validateOrderStatus } from '../validators/schemas.js';
+import {
+  validateOrderSubmission,
+  validateOrderStatus,
+  validateOrderTrackInput,
+} from '../validators/schemas.js';
 import { logAdminActivity } from '../services/auditService.js';
 import { notifyOrderCreated, notifyOrderStatusUpdated } from '../services/emailService.js';
-import { getOptionalAuthenticatedClient } from '../middleware/authMiddleware.js';
+import { resolveOptionalClientAuth } from '../middleware/authMiddleware.js';
 
 export function mapOrderRow(row, { includeInternal = true } = {}) {
   if (!row) return null;
@@ -116,66 +121,133 @@ async function generateNextOrderNumber(env) {
   return `${prefix}${String(maxSeq + 1).padStart(4, '0')}`;
 }
 
+function mapTrackedOrderSummary(row, historyRows = []) {
+  if (!row) return null;
+  const quotationAmount =
+    row.quotation_amount !== null && row.quotation_amount !== undefined
+      ? Number(row.quotation_amount)
+      : null;
+
+  return {
+    id: row.id,
+    order_number: row.order_number,
+    orderNumber: row.order_number,
+    referenceId: row.order_number,
+    service: row.service_name,
+    service_name: row.service_name,
+    serviceName: row.service_name,
+    package_title: row.package_title || '',
+    packageTitle: row.package_title || '',
+    project_name: row.project_name,
+    projectName: row.project_name,
+    status: row.status,
+    quotation_amount: quotationAmount,
+    quotationAmount,
+    quotation_currency: row.quotation_currency || 'INR',
+    quotationCurrency: row.quotation_currency || 'INR',
+    expected_delivery_date: row.expected_delivery_date || '',
+    expectedDeliveryDate: row.expected_delivery_date || '',
+    expected_timeline: row.expected_timeline || '',
+    expectedTimeline: row.expected_timeline || '',
+    urgency: row.urgency || 'Standard',
+    customer_update: row.customer_update || '',
+    customerUpdate: row.customer_update || '',
+    created_at: row.created_at,
+    createdAt: row.created_at,
+    updated_at: row.updated_at,
+    updatedAt: row.updated_at,
+    statusHistory: (historyRows || []).map((h) => ({
+      id: h.id,
+      previous_status: h.previous_status,
+      previousStatus: h.previous_status,
+      new_status: h.new_status,
+      newStatus: h.new_status,
+      notes: h.notes,
+      note: h.notes,
+      created_at: h.created_at,
+      createdAt: h.created_at,
+      changedAt: h.created_at,
+    })),
+  };
+}
+
 export async function createOrder(request, env) {
+  const { client: authClient, errorResponse: authCsrfError } = await resolveOptionalClientAuth(
+    request,
+    env
+  );
+  if (authCsrfError) {
+    return authCsrfError;
+  }
+
   const body = await parseJsonBody(request);
   const validation = validateOrderSubmission(body);
   if (!validation.isValid) {
     return errorResponse('Order validation failed.', 400, 'VALIDATION_ERROR', validation.errors);
   }
 
-  const authClient = await getOptionalAuthenticatedClient(request, env);
   const d = validation.data;
   const now = new Date().toISOString();
 
-  // 1. Upsert Customer in customers table without overwriting verified client account profiles from unauthenticated guest orders
-  let customer = await env.DB.prepare('SELECT id FROM customers WHERE lower(email) = lower(?)')
-    .bind(d.customerEmail)
-    .first();
-
-  let customerId;
-  if (customer) {
-    customerId = customer.id;
-    const linkedAccount = await env.DB.prepare(
-      'SELECT id FROM customer_accounts WHERE customer_id = ? LIMIT 1'
+  // Strictly isolate guest submissions from existing verified client portals:
+  // only authenticated verified clients attach orders to their customer_id.
+  let orderCustomerId = null;
+  if (authClient && authClient.customerId) {
+    orderCustomerId = authClient.customerId;
+    await env.DB.prepare(
+      'UPDATE customers SET full_name = ?, phone = ?, city = ?, business_name = ?, updated_at = ? WHERE id = ?'
     )
-      .bind(customerId)
+      .bind(d.customerName, d.customerPhone, d.customerCity, d.businessName, now, orderCustomerId)
+      .run();
+  } else {
+    const existingCustomer = await env.DB.prepare(
+      'SELECT id FROM customers WHERE lower(email) = lower(?)'
+    )
+      .bind(d.customerEmail)
       .first();
 
-    const isOwnerClient = Boolean(authClient && authClient.customerId === customerId);
-    if (!linkedAccount || isOwnerClient) {
-      await env.DB.prepare(
-        'UPDATE customers SET full_name = ?, phone = ?, city = ?, business_name = ?, updated_at = ? WHERE id = ?'
+    if (existingCustomer) {
+      const linkedAccount = await env.DB.prepare(
+        'SELECT id FROM customer_accounts WHERE customer_id = ? LIMIT 1'
       )
-        .bind(d.customerName, d.customerPhone, d.customerCity, d.businessName, now, customerId)
-        .run();
-    }
-  } else {
-    customerId = generateRandomId('cust');
-    try {
-      await env.DB.prepare(
-        `INSERT INTO customers (id, full_name, email, phone, city, business_name, created_at, updated_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
-      )
-        .bind(
-          customerId,
-          d.customerName,
-          d.customerEmail,
-          d.customerPhone,
-          d.customerCity,
-          d.businessName,
-          now,
-          now
+        .bind(existingCustomer.id)
+        .first();
+      if (!linkedAccount) {
+        await env.DB.prepare(
+          'UPDATE customers SET full_name = ?, phone = ?, city = ?, business_name = ?, updated_at = ? WHERE id = ?'
         )
-        .run();
-    } catch (custErr) {
-      if (/UNIQUE constraint failed/i.test(String(custErr?.message || ''))) {
-        customer = await env.DB.prepare('SELECT id FROM customers WHERE lower(email) = lower(?)')
-          .bind(d.customerEmail)
-          .first();
-        if (!customer) throw custErr;
-        customerId = customer.id;
-      } else {
-        throw custErr;
+          .bind(
+            d.customerName,
+            d.customerPhone,
+            d.customerCity,
+            d.businessName,
+            now,
+            existingCustomer.id
+          )
+          .run();
+      }
+    } else {
+      const newCustomerId = generateRandomId('cust');
+      try {
+        await env.DB.prepare(
+          `INSERT INTO customers (id, full_name, email, phone, city, business_name, created_at, updated_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
+        )
+          .bind(
+            newCustomerId,
+            d.customerName,
+            d.customerEmail,
+            d.customerPhone,
+            d.customerCity,
+            d.businessName,
+            now,
+            now
+          )
+          .run();
+      } catch (custErr) {
+        if (!/UNIQUE constraint failed/i.test(String(custErr?.message || ''))) {
+          throw custErr;
+        }
       }
     }
   }
@@ -216,18 +288,27 @@ export async function createOrder(request, env) {
     }
   }
 
-  // 3. Atomically insert order + order_items + initial order_status_history with collision retry
+  // 3. Atomically insert order + order_items + initial order_status_history + tracking token
   const orderId = generateRandomId('ord');
   const initialStatus = 'Pending';
   const initialCustomerUpdate =
     'Your website development request has been received by DreamTech Kashmir Solutions and is queued for scope review.';
   const orderItemId = generateRandomId('item');
   const historyId = generateRandomId('hist');
+  const trackingTokenId = generateRandomId('otok');
+  const rawTrackingToken = generateRandomToken(32);
+  const trackingTokenHash = await sha256Hex(rawTrackingToken);
+  const trackingExpiresAt = new Date(
+    Date.now() + ORDER_TRACKING_TOKEN_EXPIRY_SECONDS * 1000
+  ).toISOString();
 
   let orderNumber = '';
   for (let attempt = 0; attempt < 5; attempt++) {
     const candidate = await generateNextOrderNumber(env);
-    const suffixOffset = attempt === 0 ? candidate : `${candidate.slice(0, -4)}${String(Number.parseInt(candidate.slice(-4), 10) + attempt).padStart(4, '0')}`;
+    const suffixOffset =
+      attempt === 0
+        ? candidate
+        : `${candidate.slice(0, -4)}${String(Number.parseInt(candidate.slice(-4), 10) + attempt).padStart(4, '0')}`;
     orderNumber = attempt === 0 ? candidate : suffixOffset;
 
     try {
@@ -244,7 +325,7 @@ export async function createOrder(request, env) {
         ).bind(
           orderId,
           orderNumber,
-          customerId,
+          orderCustomerId,
           resolvedServiceId,
           resolvedPackageId,
           resolvedServiceName,
@@ -295,6 +376,10 @@ export async function createOrder(request, env) {
           `INSERT INTO order_status_history (id, order_id, previous_status, new_status, changed_by_admin_id, notes, created_at)
            VALUES (?, ?, NULL, ?, NULL, 'Customer submitted website order request', ?)`
         ).bind(historyId, orderId, initialStatus, now),
+        env.DB.prepare(
+          `INSERT INTO order_tracking_tokens (id, order_id, token_hash, expires_at, revoked_at, created_at, last_accessed_at)
+           VALUES (?, ?, ?, ?, NULL, ?, NULL)`
+        ).bind(trackingTokenId, orderId, trackingTokenHash, trackingExpiresAt, now),
       ]);
       break;
     } catch (insertErr) {
@@ -311,40 +396,58 @@ export async function createOrder(request, env) {
   const createdRow = await env.DB.prepare('SELECT * FROM orders WHERE id = ?').bind(orderId).first();
   const publicOrder = mapOrderRow(createdRow, { includeInternal: false });
 
-  await notifyOrderCreated(env, publicOrder);
+  await notifyOrderCreated(env, publicOrder, { trackingToken: rawTrackingToken });
 
-  return successResponse({ order: publicOrder }, 'Website order submitted successfully.', 201);
+  return successResponse(
+    {
+      order: publicOrder,
+      trackingToken: rawTrackingToken,
+      trackingExpiresAt,
+    },
+    'Website order submitted successfully.',
+    201
+  );
 }
 
 export async function trackCustomerOrder(request, env) {
-  const url = new URL(request.url);
-  const ref = sanitizeText(
-    url.searchParams.get('ref') || url.searchParams.get('order_number') || url.searchParams.get('orderNumber') || '',
-    60
-  );
-  const email = sanitizeText(url.searchParams.get('email') || '', 254).toLowerCase();
-
-  if (!ref || !email) {
+  const body = await parseJsonBody(request);
+  const validation = validateOrderTrackInput(body);
+  if (!validation.isValid) {
     return errorResponse(
-      'Both order reference ID and customer email address are required.',
+      'A valid order tracking token is required.',
       400,
-      'MISSING_TRACKING_PARAMS'
+      'VALIDATION_ERROR',
+      validation.errors
     );
   }
 
+  const tokenHash = await sha256Hex(validation.data.token);
+  const now = new Date().toISOString();
+
   const row = await env.DB.prepare(
-    'SELECT * FROM orders WHERE lower(order_number) = lower(?) AND lower(customer_email) = lower(?) LIMIT 1'
+    `SELECT o.*, ott.id AS tracking_token_id
+     FROM order_tracking_tokens ott
+     INNER JOIN orders o ON o.id = ott.order_id
+     WHERE ott.token_hash = ?
+       AND ott.revoked_at IS NULL
+       AND julianday(ott.expires_at) > julianday(?)
+     LIMIT 1`
   )
-    .bind(ref, email)
+    .bind(tokenHash, now)
     .first();
 
   if (!row) {
     return errorResponse(
-      'No matching website order found for the provided reference ID and email address.',
+      'No active website order was found for the provided tracking token.',
       404,
       'ORDER_NOT_FOUND'
     );
   }
+
+  await env.DB.prepare('UPDATE order_tracking_tokens SET last_accessed_at = ? WHERE id = ?')
+    .bind(now, row.tracking_token_id)
+    .run()
+    .catch(() => {});
 
   const historyResult = await env.DB.prepare(
     'SELECT id, previous_status, new_status, notes, created_at FROM order_status_history WHERE order_id = ? ORDER BY created_at ASC'
@@ -352,20 +455,7 @@ export async function trackCustomerOrder(request, env) {
     .bind(row.id)
     .all();
 
-  const order = mapOrderRow(row, { includeInternal: false });
-  order.statusHistory = (historyResult.results || []).map((h) => ({
-    id: h.id,
-    previous_status: h.previous_status,
-    previousStatus: h.previous_status,
-    new_status: h.new_status,
-    newStatus: h.new_status,
-    notes: h.notes,
-    note: h.notes,
-    created_at: h.created_at,
-    createdAt: h.created_at,
-    changedAt: h.created_at,
-  }));
-
+  const order = mapTrackedOrderSummary(row, historyResult.results || []);
   return successResponse({ order }, 'Order tracking record retrieved.');
 }
 

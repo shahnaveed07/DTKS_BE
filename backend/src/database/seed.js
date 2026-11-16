@@ -668,11 +668,10 @@ const SEED_TEAM = [
 
 const initializedDatabases = new WeakSet();
 
-function isValidBootstrapPassword(password, isProduction = false) {
+function isValidBootstrapPassword(password) {
   if (typeof password !== 'string') return false;
   const trimmed = password.trim();
-  const minLength = isProduction ? 12 : 8;
-  if (trimmed.length < minLength || trimmed.length > 128) return false;
+  if (trimmed.length < 12 || trimmed.length > 128) return false;
   if (/replace-with|changeme|password123|your-strong|admin123|12345678|<your/i.test(trimmed)) {
     return false;
   }
@@ -694,6 +693,7 @@ export const REQUIRED_D1_TABLES = [
   'orders',
   'order_items',
   'order_status_history',
+  'order_tracking_tokens',
   'contact_messages',
   'site_settings',
   'activity_logs',
@@ -751,7 +751,7 @@ export async function ensureDatabaseSeeded(env) {
         'DTKS Principal Administrator'
       ).trim();
 
-      if (isValidEmail(rawEmail) && isValidBootstrapPassword(rawPassword, isProduction)) {
+      if (isValidEmail(rawEmail) && isValidBootstrapPassword(rawPassword)) {
         const passwordHash = await hashPassword(rawPassword);
         await env.DB.prepare(
           `INSERT OR IGNORE INTO admins (id, name, email, password_hash, role, is_active, created_at, updated_at, last_login_at)

@@ -21,26 +21,67 @@ export const RATE_LIMIT_POLICIES = {
   authLogin: {
     windowMs: 15 * 60 * 1000, // 15 minutes
     maxRequests: 10,
+    failClosedInProd: true,
     message: 'Too many login attempts. Please wait 15 minutes before trying again.',
   },
   authRefresh: {
     windowMs: 15 * 60 * 1000, // 15 minutes
     maxRequests: 30,
+    failClosedInProd: true,
     message: 'Too many token refresh requests. Please wait a few minutes before trying again.',
   },
   clientRegister: {
     windowMs: 15 * 60 * 1000, // 15 minutes
     maxRequests: 10,
+    failClosedInProd: true,
     message: 'Too many registration attempts. Please wait 15 minutes before trying again.',
+  },
+  clientRegisterEmail: {
+    windowMs: 15 * 60 * 1000, // 15 minutes
+    maxRequests: 5,
+    failClosedInProd: true,
+    message: 'Too many registration attempts for this email address. Please wait 15 minutes before trying again.',
   },
   clientVerifyEmail: {
     windowMs: 15 * 60 * 1000, // 15 minutes
     maxRequests: 15,
+    failClosedInProd: true,
     message: 'Too many email verification attempts. Please wait 15 minutes before trying again.',
+  },
+  clientVerificationEmail: {
+    windowMs: 15 * 60 * 1000, // 15 minutes
+    maxRequests: 5,
+    failClosedInProd: true,
+    message: 'Too many verification email requests for this email address. Please wait 15 minutes before trying again.',
+  },
+  clientVerificationToken: {
+    windowMs: 15 * 60 * 1000, // 15 minutes
+    maxRequests: 8,
+    failClosedInProd: true,
+    message: 'Too many verification attempts for this verification token. Please wait 15 minutes before trying again.',
+  },
+  clientPasswordReset: {
+    windowMs: 15 * 60 * 1000, // 15 minutes
+    maxRequests: 8,
+    failClosedInProd: true,
+    message: 'Too many password reset requests. Please wait 15 minutes before trying again.',
+  },
+  clientPasswordResetEmail: {
+    windowMs: 15 * 60 * 1000, // 15 minutes
+    maxRequests: 5,
+    failClosedInProd: true,
+    message: 'Too many password reset requests for this email address. Please wait 15 minutes before trying again.',
+  },
+  clientPasswordResetToken: {
+    windowMs: 15 * 60 * 1000, // 15 minutes
+    maxRequests: 8,
+    failClosedInProd: true,
+    message: 'Too many password reset attempts for this reset token. Please request a new reset link or wait 15 minutes.',
   },
   passwordReset: {
     windowMs: 15 * 60 * 1000, // 15 minutes
     maxRequests: 8,
+    failClosedInProd: true,
     message: 'Too many password reset requests. Please wait 15 minutes before trying again.',
   },
   adminPasswordReset: {
@@ -69,11 +110,25 @@ export const RATE_LIMIT_POLICIES = {
   adminInvite: {
     windowMs: 15 * 60 * 1000, // 15 minutes
     maxRequests: 20,
+    failClosedInProd: true,
     message: 'Too many invitation requests. Please wait 15 minutes before trying again.',
+  },
+  orderTracking: {
+    windowMs: 15 * 60 * 1000, // 15 minutes
+    maxRequests: 20,
+    failClosedInProd: true,
+    message: 'Too many order tracking requests. Please wait 15 minutes before trying again.',
+  },
+  orderTrackingToken: {
+    windowMs: 15 * 60 * 1000, // 15 minutes
+    maxRequests: 15,
+    failClosedInProd: true,
+    message: 'Too many tracking requests for this order token. Please wait 15 minutes before trying again.',
   },
   publicSubmission: {
     windowMs: 10 * 60 * 1000, // 10 minutes
-    maxRequests: 25,
+    maxRequests: 15,
+    failClosedInProd: true,
     message: 'Submission rate limit exceeded. Please wait a few minutes before submitting again.',
   },
   generalApi: {
@@ -201,7 +256,7 @@ function buildRateLimiterUnavailableResponse() {
   return {
     allowed: false,
     response: errorResponse(
-      'Administrator password recovery rate limiting is temporarily unavailable. Please try again shortly.',
+      'Rate limiting protection is temporarily unavailable for this security-sensitive operation. Please try again shortly.',
       503,
       'RATE_LIMITER_UNAVAILABLE'
     ),
@@ -381,6 +436,148 @@ export async function enforceAdminPasswordResetRateLimits(
       const tokenCheck = await checkRateLimit(
         request,
         'adminPasswordResetToken',
+        env,
+        `tok:${tokenHmac}`,
+        { includeIp: false }
+      );
+      if (!tokenCheck.allowed) return tokenCheck;
+    }
+  }
+
+  return { allowed: true };
+}
+
+export async function enforceClientPasswordResetRateLimits(
+  request,
+  env,
+  { mode = 'forgot', body = null, skipIpCheck = false } = {}
+) {
+  if (!skipIpCheck) {
+    const ipCheck = await checkRateLimit(request, 'clientPasswordReset', env);
+    if (!ipCheck.allowed) return ipCheck;
+  }
+
+  if (mode === 'forgot' && body && typeof body.email === 'string') {
+    const normalizedEmail = body.email.trim().toLowerCase().slice(0, 254);
+    if (normalizedEmail) {
+      const emailHmac = await buildRateLimitIdentifierHmac('client-reset-email', normalizedEmail, env);
+      const emailCheck = await checkRateLimit(
+        request,
+        'clientPasswordResetEmail',
+        env,
+        `em:${emailHmac}`,
+        { includeIp: false }
+      );
+      if (!emailCheck.allowed) return emailCheck;
+    }
+  }
+
+  if (mode === 'reset' && body && typeof body.token === 'string') {
+    const cleanToken = body.token.trim();
+    if (cleanToken) {
+      const tokenHmac = await buildRateLimitIdentifierHmac('client-reset-token', cleanToken, env);
+      const tokenCheck = await checkRateLimit(
+        request,
+        'clientPasswordResetToken',
+        env,
+        `tok:${tokenHmac}`,
+        { includeIp: false }
+      );
+      if (!tokenCheck.allowed) return tokenCheck;
+    }
+  }
+
+  return { allowed: true };
+}
+
+export async function enforceClientVerificationRateLimits(
+  request,
+  env,
+  { mode = 'resend', body = null, skipIpCheck = false } = {}
+) {
+  if (!skipIpCheck) {
+    const ipCheck = await checkRateLimit(request, 'clientVerifyEmail', env);
+    if (!ipCheck.allowed) return ipCheck;
+  }
+
+  if (mode === 'resend' && body && typeof body.email === 'string') {
+    const normalizedEmail = body.email.trim().toLowerCase().slice(0, 254);
+    if (normalizedEmail) {
+      const emailHmac = await buildRateLimitIdentifierHmac('client-verify-email', normalizedEmail, env);
+      const emailCheck = await checkRateLimit(
+        request,
+        'clientVerificationEmail',
+        env,
+        `em:${emailHmac}`,
+        { includeIp: false }
+      );
+      if (!emailCheck.allowed) return emailCheck;
+    }
+  }
+
+  if (mode === 'verify' && body && typeof body.token === 'string') {
+    const cleanToken = body.token.trim();
+    if (cleanToken) {
+      const tokenHmac = await buildRateLimitIdentifierHmac('client-verify-token', cleanToken, env);
+      const tokenCheck = await checkRateLimit(
+        request,
+        'clientVerificationToken',
+        env,
+        `tok:${tokenHmac}`,
+        { includeIp: false }
+      );
+      if (!tokenCheck.allowed) return tokenCheck;
+    }
+  }
+
+  return { allowed: true };
+}
+
+export async function enforceClientRegisterRateLimits(
+  request,
+  env,
+  { body = null, skipIpCheck = false } = {}
+) {
+  if (!skipIpCheck) {
+    const ipCheck = await checkRateLimit(request, 'clientRegister', env);
+    if (!ipCheck.allowed) return ipCheck;
+  }
+
+  if (body && typeof body.email === 'string') {
+    const normalizedEmail = body.email.trim().toLowerCase().slice(0, 254);
+    if (normalizedEmail) {
+      const emailHmac = await buildRateLimitIdentifierHmac('client-register-email', normalizedEmail, env);
+      const emailCheck = await checkRateLimit(
+        request,
+        'clientRegisterEmail',
+        env,
+        `em:${emailHmac}`,
+        { includeIp: false }
+      );
+      if (!emailCheck.allowed) return emailCheck;
+    }
+  }
+
+  return { allowed: true };
+}
+
+export async function enforceOrderTrackingRateLimits(
+  request,
+  env,
+  { body = null, skipIpCheck = false } = {}
+) {
+  if (!skipIpCheck) {
+    const ipCheck = await checkRateLimit(request, 'orderTracking', env);
+    if (!ipCheck.allowed) return ipCheck;
+  }
+
+  if (body && typeof body.token === 'string') {
+    const cleanToken = body.token.trim();
+    if (cleanToken) {
+      const tokenHmac = await buildRateLimitIdentifierHmac('order-track-token', cleanToken, env);
+      const tokenCheck = await checkRateLimit(
+        request,
+        'orderTrackingToken',
         env,
         `tok:${tokenHmac}`,
         { includeIp: false }

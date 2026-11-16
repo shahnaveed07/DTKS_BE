@@ -1,14 +1,22 @@
 import { API_PREFIX } from '../config/constants.js';
-import { isOriginAllowed } from '../config/cors.js';
+import { isOriginAllowed, isProductionEnv } from '../config/cors.js';
 import { applySecurityAndCorsHeaders } from '../middleware/securityHeaders.js';
-import { checkRateLimit, enforceAdminPasswordResetRateLimits } from '../middleware/rateLimiter.js';
-import { authenticateAdmin, authenticateClient } from '../middleware/authMiddleware.js';
+import {
+  checkRateLimit,
+  enforceAdminPasswordResetRateLimits,
+  enforceClientPasswordResetRateLimits,
+  enforceClientRegisterRateLimits,
+  enforceClientVerificationRateLimits,
+  enforceOrderTrackingRateLimits,
+} from '../middleware/rateLimiter.js';
+import { authenticateAdmin, authenticateClient, isHttpsRequest } from '../middleware/authMiddleware.js';
 import { handleException, logServerError } from '../middleware/errorHandler.js';
 import { jsonResponse, successResponse, errorResponse, parseJsonBody } from '../utils/response.js';
 import { ensureDatabaseSeeded, verifyDatabaseSchema } from '../database/seed.js';
 import { serveImageFromR2 } from '../services/storageService.js';
 
 import {
+  getAdminCsrfToken,
   loginAdmin,
   logoutAdmin,
   refreshAdminToken,
@@ -29,6 +37,7 @@ import {
   revokeAdminAccountSessions,
 } from '../controllers/adminAccountsController.js';
 import {
+  getClientCsrfToken,
   registerClient,
   resendClientVerification,
   verifyClientEmail,
@@ -139,7 +148,7 @@ function matchPath(pattern, pathname) {
 /**
  * Evaluates production dependency readiness (`GET /api/v1/ready`):
  *   - D1 binding (`env.DB`) exists and responds to a connectivity probe
- *   - All 18 required relational tables exist in D1
+ *   - All 19 required relational tables exist in D1
  *   - R2 storage binding (`env.ASSETS_BUCKET`) is available
  * Never exposes secrets, raw SQL queries, or internal credentials.
  */
@@ -250,7 +259,24 @@ export async function handleApiRequest(request, env) {
     return applySecurityAndCorsHeaders(readinessRes, request, env);
   }
 
-  // 5. Distributed General API Rate Limit Check
+  // 5. Enforce HTTPS in production for sensitive authentication, account, and tracking endpoints
+  if (
+    isProductionEnv(env) &&
+    !isHttpsRequest(request) &&
+    (pathname.startsWith(`${API_PREFIX}/auth`) ||
+      pathname.startsWith(`${API_PREFIX}/client`) ||
+      pathname.startsWith(`${API_PREFIX}/admin`) ||
+      pathname === `${API_PREFIX}/orders/track`)
+  ) {
+    const insecureRes = errorResponse(
+      'HTTPS is required in production for authentication, account, and tracking operations.',
+      403,
+      'HTTPS_REQUIRED'
+    );
+    return applySecurityAndCorsHeaders(insecureRes, request, env);
+  }
+
+  // 6. Distributed General API Rate Limit Check
   const generalRate = await checkRateLimit(request, 'generalApi', env);
   if (!generalRate.allowed) {
     return applySecurityAndCorsHeaders(generalRate.response, request, env);
@@ -323,6 +349,11 @@ export async function handleApiRequest(request, env) {
     // ========================================================================
     // 1. AUTHENTICATION ROUTES (/api/v1/auth/*)
     // ========================================================================
+    if (pathname === `${API_PREFIX}/auth/csrf` && method === 'GET') {
+      response = await getAdminCsrfToken(request, env);
+      return applySecurityAndCorsHeaders(response, request, env);
+    }
+
     if (pathname === `${API_PREFIX}/auth/login` && method === 'POST') {
       const loginRate = await checkRateLimit(request, 'authLogin', env);
       if (!loginRate.allowed) {
@@ -352,6 +383,9 @@ export async function handleApiRequest(request, env) {
 
     if (pathname === `${API_PREFIX}/auth/logout` && method === 'POST') {
       const auth = await authenticateAdmin(request, env, ROLES_ALL_ADMINS);
+      if (!auth.authenticated && auth.response?.status === 403) {
+        return applySecurityAndCorsHeaders(auth.response, request, env);
+      }
       response = await logoutAdmin(request, env, auth.authenticated ? auth.admin : null);
       return applySecurityAndCorsHeaders(response, request, env);
     }
@@ -448,10 +482,23 @@ export async function handleApiRequest(request, env) {
     // ========================================================================
     // 1C. CLIENT AUTHENTICATION ROUTES (/api/v1/client/auth/*)
     // ========================================================================
+    if (pathname === `${API_PREFIX}/client/auth/csrf` && method === 'GET') {
+      response = await getClientCsrfToken(request, env);
+      return applySecurityAndCorsHeaders(response, request, env);
+    }
+
     if (pathname === `${API_PREFIX}/client/auth/register` && method === 'POST') {
       const regRate = await checkRateLimit(request, 'clientRegister', env);
       if (!regRate.allowed) {
         return applySecurityAndCorsHeaders(regRate.response, request, env);
+      }
+      const regBody = await parseJsonBody(request.clone());
+      const layeredRegRate = await enforceClientRegisterRateLimits(request, env, {
+        body: regBody,
+        skipIpCheck: true,
+      });
+      if (!layeredRegRate.allowed) {
+        return applySecurityAndCorsHeaders(layeredRegRate.response, request, env);
       }
       response = await registerClient(request, env);
       return applySecurityAndCorsHeaders(response, request, env);
@@ -462,6 +509,15 @@ export async function handleApiRequest(request, env) {
       if (!verifyRate.allowed) {
         return applySecurityAndCorsHeaders(verifyRate.response, request, env);
       }
+      const resendBody = await parseJsonBody(request.clone());
+      const layeredResendRate = await enforceClientVerificationRateLimits(request, env, {
+        mode: 'resend',
+        body: resendBody,
+        skipIpCheck: true,
+      });
+      if (!layeredResendRate.allowed) {
+        return applySecurityAndCorsHeaders(layeredResendRate.response, request, env);
+      }
       response = await resendClientVerification(request, env);
       return applySecurityAndCorsHeaders(response, request, env);
     }
@@ -470,6 +526,15 @@ export async function handleApiRequest(request, env) {
       const verifyRate = await checkRateLimit(request, 'clientVerifyEmail', env);
       if (!verifyRate.allowed) {
         return applySecurityAndCorsHeaders(verifyRate.response, request, env);
+      }
+      const verifyBody = await parseJsonBody(request.clone());
+      const layeredVerifyRate = await enforceClientVerificationRateLimits(request, env, {
+        mode: 'verify',
+        body: verifyBody,
+        skipIpCheck: true,
+      });
+      if (!layeredVerifyRate.allowed) {
+        return applySecurityAndCorsHeaders(layeredVerifyRate.response, request, env);
       }
       response = await verifyClientEmail(request, env);
       return applySecurityAndCorsHeaders(response, request, env);
@@ -495,6 +560,9 @@ export async function handleApiRequest(request, env) {
 
     if (pathname === `${API_PREFIX}/client/auth/logout` && method === 'POST') {
       const auth = await authenticateClient(request, env);
+      if (!auth.authenticated && auth.response?.status === 403) {
+        return applySecurityAndCorsHeaders(auth.response, request, env);
+      }
       response = await logoutClient(request, env, auth.authenticated ? auth.client : null);
       return applySecurityAndCorsHeaders(response, request, env);
     }
@@ -521,18 +589,36 @@ export async function handleApiRequest(request, env) {
     }
 
     if (pathname === `${API_PREFIX}/client/auth/forgot-password` && method === 'POST') {
-      const resetRate = await checkRateLimit(request, 'passwordReset', env);
+      const resetRate = await checkRateLimit(request, 'clientPasswordReset', env);
       if (!resetRate.allowed) {
         return applySecurityAndCorsHeaders(resetRate.response, request, env);
+      }
+      const resetBody = await parseJsonBody(request.clone());
+      const layeredResetRate = await enforceClientPasswordResetRateLimits(request, env, {
+        mode: 'forgot',
+        body: resetBody,
+        skipIpCheck: true,
+      });
+      if (!layeredResetRate.allowed) {
+        return applySecurityAndCorsHeaders(layeredResetRate.response, request, env);
       }
       response = await forgotClientPassword(request, env);
       return applySecurityAndCorsHeaders(response, request, env);
     }
 
     if (pathname === `${API_PREFIX}/client/auth/reset-password` && method === 'POST') {
-      const resetRate = await checkRateLimit(request, 'passwordReset', env);
+      const resetRate = await checkRateLimit(request, 'clientPasswordReset', env);
       if (!resetRate.allowed) {
         return applySecurityAndCorsHeaders(resetRate.response, request, env);
+      }
+      const resetBody = await parseJsonBody(request.clone());
+      const layeredResetRate = await enforceClientPasswordResetRateLimits(request, env, {
+        mode: 'reset',
+        body: resetBody,
+        skipIpCheck: true,
+      });
+      if (!layeredResetRate.allowed) {
+        return applySecurityAndCorsHeaders(layeredResetRate.response, request, env);
       }
       response = await resetClientPassword(request, env);
       return applySecurityAndCorsHeaders(response, request, env);
@@ -758,9 +844,31 @@ export async function handleApiRequest(request, env) {
     // ========================================================================
     // 5. ORDERS ROUTES (/api/v1/orders/*)
     // ========================================================================
-    if (pathname === `${API_PREFIX}/orders/track` && method === 'GET') {
-      response = await trackCustomerOrder(request, env);
-      return applySecurityAndCorsHeaders(response, request, env);
+    if (pathname === `${API_PREFIX}/orders/track`) {
+      if (method === 'POST') {
+        const ipRate = await checkRateLimit(request, 'orderTracking', env);
+        if (!ipRate.allowed) {
+          return applySecurityAndCorsHeaders(ipRate.response, request, env);
+        }
+        const trackBody = await parseJsonBody(request.clone());
+        const layeredTrackRate = await enforceOrderTrackingRateLimits(request, env, {
+          body: trackBody,
+          skipIpCheck: true,
+        });
+        if (!layeredTrackRate.allowed) {
+          return applySecurityAndCorsHeaders(layeredTrackRate.response, request, env);
+        }
+        response = await trackCustomerOrder(request, env);
+        return applySecurityAndCorsHeaders(response, request, env);
+      }
+      if (method === 'GET') {
+        const goneRes = errorResponse(
+          'Legacy GET order tracking by order number and email is permanently disabled. Use POST /api/v1/orders/track with your private tracking token.',
+          410,
+          'LEGACY_TRACKING_DISABLED'
+        );
+        return applySecurityAndCorsHeaders(goneRes, request, env);
+      }
     }
 
     if (pathname === `${API_PREFIX}/orders`) {

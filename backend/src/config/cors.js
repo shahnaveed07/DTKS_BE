@@ -15,7 +15,7 @@ const DEV_ALLOWED_ORIGINS = [
   'http://localhost:8787',
 ];
 
-function isProductionEnv(env = {}) {
+export function isProductionEnv(env = {}) {
   return (
     String(env?.ENVIRONMENT || '').toLowerCase() === 'production' ||
     (typeof process !== 'undefined' &&
@@ -40,14 +40,13 @@ export function getAllowedOrigins(env = {}) {
     : [];
   const appUrl = env.APP_URL ? [String(env.APP_URL).trim().replace(/\/+$/, '')] : [];
   const inProd = isProductionEnv(env);
-  const allowLocalInProd = String(env?.ALLOW_LOCAL_CORS || '').toLowerCase() === 'true';
 
   const baseOrigins = inProd
     ? PRODUCTION_ALLOWED_ORIGINS
     : [...PRODUCTION_ALLOWED_ORIGINS, ...DEV_ALLOWED_ORIGINS];
 
   const combined = Array.from(new Set([...baseOrigins, ...custom, ...appUrl]));
-  if (inProd && !allowLocalInProd) {
+  if (inProd) {
     return combined.filter((origin) => !isDevOrPreviewOrigin(origin));
   }
   return combined;
@@ -70,7 +69,7 @@ export function buildCorsHeaders(request, env = {}) {
   const headers = {
     'Access-Control-Allow-Methods': 'GET, POST, PUT, PATCH, DELETE, OPTIONS',
     'Access-Control-Allow-Headers':
-      'Content-Type, Authorization, X-CSRF-Token, X-Requested-With, Accept',
+      'Content-Type, Authorization, X-CSRF-Token, X-Auth-Mode, X-Requested-With, Accept',
     'Access-Control-Expose-Headers':
       'X-Request-Id, X-RateLimit-Limit, X-RateLimit-Remaining, Retry-After',
     'Access-Control-Max-Age': '86400',
@@ -84,3 +83,4 @@ export function buildCorsHeaders(request, env = {}) {
 
   return headers;
 }
+

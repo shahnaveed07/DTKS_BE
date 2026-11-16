@@ -76,6 +76,12 @@ describe('DTKS Production Backend Audit & Security Test Suite (/api/v1)', () => 
     if (origin) reqHeaders.set('Origin', origin);
     if (ip) reqHeaders.set('CF-Connecting-IP', ip);
     if (token) reqHeaders.set('Authorization', `Bearer ${token}`);
+    if (
+      !reqHeaders.has('X-Auth-Mode') &&
+      (pathname.endsWith('/login') || pathname.endsWith('/refresh'))
+    ) {
+      reqHeaders.set('X-Auth-Mode', 'bearer');
+    }
 
     let requestBody = body;
     if (body && !(body instanceof FormData) && typeof body === 'object' && !Buffer.isBuffer(body)) {
@@ -204,15 +210,23 @@ describe('DTKS Production Backend Audit & Security Test Suite (/api/v1)', () => 
     assert.ok(refreshRes.json.data.refreshToken);
     assert.notEqual(refreshRes.json.data.refreshToken, refreshToken);
 
-    // Reusing the old refresh token is rejected with 401
+    // Reusing the old rotated refresh token triggers replay detection (revokes all sessions) -> 401
     const reuseRes = await apiRequest('/api/v1/auth/refresh', {
       method: 'POST',
       body: { refreshToken },
     });
     assert.equal(reuseRes.status, 401);
+    assert.equal(reuseRes.json.error.code, 'REFRESH_TOKEN_REPLAY_DETECTED');
 
-    accessToken = refreshRes.json.data.accessToken;
-    refreshToken = refreshRes.json.data.refreshToken;
+    // Re-login after replay revocation to obtain an active token pair for subsequent tests
+    const postReplayLogin = await apiRequest('/api/v1/auth/login', {
+      method: 'POST',
+      ip: '10.0.0.9',
+      body: { email: TEST_ADMIN_EMAIL, password: TEST_ADMIN_PASSWORD },
+    });
+    assert.equal(postReplayLogin.status, 200);
+    accessToken = postReplayLogin.json.data.accessToken;
+    refreshToken = postReplayLogin.json.data.refreshToken;
   });
 
   it('6. Role-Based Authorization (RBAC) & Destructive Reset Removal: Enforces editor vs super_admin permissions', async () => {
@@ -462,6 +476,8 @@ describe('DTKS Production Backend Audit & Security Test Suite (/api/v1)', () => 
     assert.equal(orderRes.status, 201);
     createdOrderId = orderRes.json.data.order.id;
     createdOrderRef = orderRes.json.data.order.order_number;
+    const createdOrderTrackingToken = orderRes.json.data.trackingToken;
+    assert.ok(createdOrderTrackingToken && createdOrderTrackingToken.length >= 64);
     assert.equal(orderRes.json.data.order.status, 'Pending');
 
     // Invalid order submission fails with 400
@@ -500,13 +516,21 @@ describe('DTKS Production Backend Audit & Security Test Suite (/api/v1)', () => 
     assert.equal(progressRes.json.data.order.status, 'InProgress');
     assert.ok(progressRes.json.data.order.statusHistory.length >= 3);
 
-    // Public tracking reflects updated status and history without leaking internal admin_notes
-    const trackRes = await apiRequest(
-      `/api/v1/orders/track?ref=${encodeURIComponent(createdOrderRef)}&email=tariq.ahmad@example.com`
-    );
+    // Public tracking via POST /api/v1/orders/track reflects updated status without leaking admin_notes or PII
+    const trackRes = await apiRequest('/api/v1/orders/track', {
+      method: 'POST',
+      body: { token: createdOrderTrackingToken },
+    });
     assert.equal(trackRes.status, 200);
     assert.equal(trackRes.json.data.order.status, 'InProgress');
     assert.equal(trackRes.json.data.order.admin_notes, undefined);
+    assert.equal(trackRes.json.data.order.customer_email, undefined);
+
+    // Legacy GET /api/v1/orders/track returns 410 Gone
+    const legacyTrackRes = await apiRequest(
+      `/api/v1/orders/track?ref=${encodeURIComponent(createdOrderRef)}&email=tariq.ahmad@example.com`
+    );
+    assert.equal(legacyTrackRes.status, 410);
   });
 
   it('12. Contact Messages, XSS Sanitization & Spam Protection: Works end-to-end', async () => {

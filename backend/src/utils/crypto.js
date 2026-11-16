@@ -68,6 +68,17 @@ export function timingSafeEqualBytes(a, b) {
   return diff === 0;
 }
 
+export async function timingSafeEqualStrings(a, b) {
+  if (typeof a !== 'string' || typeof b !== 'string' || a.length === 0 || b.length === 0) {
+    return false;
+  }
+  const [digestA, digestB] = await Promise.all([
+    crypto.subtle.digest('SHA-256', encoder.encode(a)),
+    crypto.subtle.digest('SHA-256', encoder.encode(b)),
+  ]);
+  return timingSafeEqualBytes(new Uint8Array(digestA), new Uint8Array(digestB));
+}
+
 export function generateRandomId(prefix = 'id') {
   const bytes = new Uint8Array(12);
   crypto.getRandomValues(bytes);
@@ -267,8 +278,8 @@ export async function verifyJwt(token, secret) {
     throw err;
   }
 
-  if (!header || header.alg !== 'HS256') {
-    const err = new Error('Unsupported JWT algorithm.');
+  if (!header || header.alg !== 'HS256' || header.typ !== 'JWT') {
+    const err = new Error('Unsupported JWT algorithm or token type.');
     err.code = 'INVALID_TOKEN';
     throw err;
   }
@@ -298,7 +309,29 @@ export async function verifyJwt(token, secret) {
     throw err;
   }
 
+  if (!payload || typeof payload !== 'object' || Array.isArray(payload)) {
+    const err = new Error('Invalid token payload.');
+    err.code = 'INVALID_PAYLOAD';
+    throw err;
+  }
+
   const now = Math.floor(Date.now() / 1000);
+  const clockSkewSeconds = 30;
+  if (typeof payload.iat !== 'number' || payload.iat > now + clockSkewSeconds) {
+    const err = new Error('Authentication token issued-at claim is invalid.');
+    err.code = 'INVALID_TOKEN';
+    throw err;
+  }
+
+  if (
+    payload.nbf !== undefined &&
+    (typeof payload.nbf !== 'number' || payload.nbf > now + clockSkewSeconds)
+  ) {
+    const err = new Error('Authentication token is not yet valid.');
+    err.code = 'TOKEN_NOT_YET_VALID';
+    throw err;
+  }
+
   if (typeof payload.exp !== 'number' || payload.exp <= now) {
     const err = new Error('Authentication token has expired.');
     err.code = 'TOKEN_EXPIRED';

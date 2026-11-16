@@ -24,8 +24,7 @@
 | Method | Endpoint | Purpose | Success Status | Failure Status |
 | :--- | :--- | :--- | :--- | :--- |
 | `GET` | `/api/v1/health` | **Liveness Check** — Verifies the Worker is running without touching D1, R2, seeding, or DB rate limiting | `200 OK` (`status: "healthy"`) | N/A |
-| `GET` | `/api/v1/ready` | **Readiness Check** — Verifies D1 binding, D1 connection, all 18 schema tables, and R2 `ASSETS_BUCKET` binding | `200 OK` (`status: "ready"`, `database: "connected"`, `schema: "valid"`, `storage: "available"`) | `503 Service Unavailable` (`status: "not_ready"`) |
-
+| `GET` | `/api/v1/ready` | **Readiness Check** — Verifies D1 binding, D1 connection, all 19 schema tables, and R2 `ASSETS_BUCKET` binding | `200 OK` (`status: "ready"`, `database: "connected"`, `schema: "valid"`, `storage: "available"`) | `503 Service Unavailable` (`status: "not_ready"`) |
 
 ---
 
@@ -37,7 +36,7 @@
   "success": true,
   "message": "Operation completed successfully.",
   "data": {},
-  "timestamp": "2026-11-14T08:00:00.000Z"
+  "timestamp": "2026-11-16T08:00:00.000Z"
 }
 ```
 
@@ -52,7 +51,7 @@
       "customerEmail": "A valid customer email address is required."
     }
   },
-  "timestamp": "2026-11-14T08:00:00.000Z"
+  "timestamp": "2026-11-16T08:00:00.000Z"
 }
 ```
 
@@ -60,55 +59,58 @@
 - `200 OK` – Request succeeded.
 - `201 Created` – Resource created (`POST /services`, `POST /packages`, `POST /portfolio`, `POST /orders`, `POST /contact`, `POST /portfolio/upload`, `POST /admin/accounts`, `POST /client/auth/register`).
 - `204 No Content` – CORS `OPTIONS` preflight succeeded.
-- `400 Bad Request` – Input validation failed (`VALIDATION_ERROR`, `INVALID_STATUS`, `INVALID_IMAGE_UPLOAD`, `INVALID_INVITE_TOKEN`, `INVITE_TOKEN_EXPIRED`, `INVITE_TOKEN_ALREADY_USED`, `INVALID_VERIFICATION_TOKEN`, `VERIFICATION_TOKEN_USED`, `VERIFICATION_TOKEN_EXPIRED`, `INVALID_RESET_TOKEN`, `RESET_TOKEN_USED`, `RESET_TOKEN_EXPIRED`).
-- `401 Unauthorized` – Missing, invalid, revoked, or expired JWT access/refresh token (`UNAUTHORIZED`, `INVALID_CREDENTIALS`, `INVALID_REFRESH_TOKEN`, `SESSION_REVOKED`).
-- `403 Forbidden` – Origin blocked by CORS policy (`CORS_ORIGIN_FORBIDDEN`), CSRF check failed (`CSRF_VALIDATION_FAILED`), email not verified (`EMAIL_NOT_VERIFIED`), pending admin invite (`INVITE_PENDING`), account deactivated (`ACCOUNT_DEACTIVATED`), or insufficient role permissions (`FORBIDDEN`).
+- `400 Bad Request` – Input validation failed (`VALIDATION_ERROR`, `INVALID_STATUS`, `INVALID_IMAGE_UPLOAD`, `INVALID_ASSET_KEY`, `INVALID_INVITE_TOKEN`, `INVITE_TOKEN_EXPIRED`, `INVITE_TOKEN_ALREADY_USED`, `INVALID_VERIFICATION_TOKEN`, `VERIFICATION_TOKEN_USED`, `VERIFICATION_TOKEN_EXPIRED`, `INVALID_RESET_TOKEN`, `RESET_TOKEN_USED`, `RESET_TOKEN_EXPIRED`).
+- `401 Unauthorized` – Missing, invalid, revoked, replayed, or expired JWT access/refresh token (`UNAUTHORIZED`, `INVALID_CREDENTIALS`, `INVALID_REFRESH_TOKEN`, `REFRESH_TOKEN_REPLAY_DETECTED`, `SESSION_REVOKED`).
+- `403 Forbidden` – Plaintext HTTP blocked in production (`HTTPS_REQUIRED`), origin blocked by CORS policy (`CORS_ORIGIN_FORBIDDEN`), CSRF check failed (`CSRF_VALIDATION_FAILED`), email not verified (`EMAIL_NOT_VERIFIED`), pending admin invite (`INVITE_PENDING`), account deactivated (`ACCOUNT_DEACTIVATED`), or insufficient role permissions (`FORBIDDEN`).
 - `404 Not Found` – Resource or endpoint not found (`NOT_FOUND`, `ORDER_NOT_FOUND`, `ASSET_NOT_FOUND`).
 - `409 Conflict` – Duplicate registration or protected last active super admin (`ADMIN_EMAIL_EXISTS`, `REGISTRATION_CONFLICT`, `LAST_SUPER_ADMIN_PROTECTED`).
+- `410 Gone` – Deprecated legacy GET order tracking endpoint (`LEGACY_TRACKING_DISABLED`).
+- `413 Payload Too Large` – Oversized R2 upload payload (`PAYLOAD_TOO_LARGE`).
 - `429 Too Many Requests` – Rate limit exceeded (`RATE_LIMIT_EXCEEDED`, includes `Retry-After` header).
 - `500 Internal Server Error` – Unexpected server error (`INTERNAL_SERVER_ERROR`, internal stack traces are never leaked).
-- `503 Service Unavailable` – Dependency or transactional email provider unavailable (`SERVICE_NOT_READY`, `EMAIL_PROVIDER_UNCONFIGURED`, `EMAIL_DELIVERY_FAILED`).
+- `502 Bad Gateway` – Upstream R2 storage failure (`R2_STORAGE_ERROR`).
+- `503 Service Unavailable` – Dependency, distributed rate limiter (`RATE_LIMITER_UNAVAILABLE`), or transactional email provider unavailable (`SERVICE_NOT_READY`, `EMAIL_PROVIDER_UNCONFIGURED`, `EMAIL_DELIVERY_FAILED`).
 
 ---
 
-## 3. CORS Configuration & Security Headers
+## 3. Transport Security, CORS, Cookies, CSRF & HTTP Security Headers
 
-### Allowed Origins
+### HTTPS Enforcement & Security Headers
+- In `ENVIRONMENT === 'production'`, plaintext `http://` requests to `/api/v1/auth/*`, `/api/v1/client/*`, `/api/v1/admin/*`, and `/api/v1/orders/track` are rejected with `403 HTTPS_REQUIRED` (honoring `X-Forwarded-Proto`).
+- API JSON responses include:
+  - `X-Frame-Options: DENY`
+  - `X-Content-Type-Options: nosniff`
+  - `Cross-Origin-Opener-Policy: same-origin`
+  - `Cross-Origin-Resource-Policy: same-site` *(overridden to `cross-origin` on R2 image streams)*
+  - `Cache-Control: no-store` *(overridden to `public, max-age=31536000, immutable` on immutable R2 image streams)*
+  - `Content-Security-Policy: default-src 'none'; frame-ancestors 'none'; base-uri 'none'; form-action 'none'`
+  - `Strict-Transport-Security: max-age=31536000; includeSubDomains` *(production HTTPS)*
+
+### Allowed Origins (CORS)
 - **Production (`ENVIRONMENT=production`)**:
-  - `https://dreamtechkashmirsolutions.studio`
-  - `https://www.dreamtechkashmirsolutions.studio`
-  - Plus any explicit production origins in `CORS_ALLOWED_ORIGINS` (development `localhost`, `127.0.0.1`, `[::1]`, and `*.run.app` origins are strictly rejected with `403 CORS_ORIGIN_FORBIDDEN` in production unless `ALLOW_LOCAL_CORS=true` is explicitly enabled).
+  - Strictly `https://dreamtechkashmirsolutions.studio`, `https://www.dreamtechkashmirsolutions.studio`, and any explicit production domains in `CORS_ALLOWED_ORIGINS`. Localhost, loopback IPs, and `*.run.app` origins are unconditionally rejected (`ALLOW_LOCAL_CORS` cannot override production).
 - **Development (`ENVIRONMENT=development`)**:
   - Production origins plus `http://localhost:3000`, `http://127.0.0.1:3000`, `http://localhost:5173`, `http://127.0.0.1:5173`, `http://localhost:8787`, and `https://*.run.app`.
 
-Requests with an unauthorized `Origin` header receive `403 Forbidden` (`CORS_ORIGIN_FORBIDDEN`). When no `Origin` header is sent (e.g. server-to-server `curl`), `Access-Control-Allow-Origin` is omitted rather than falling back to a hardcoded origin.
-
-### CORS Headers & Authentication Transport
 CORS preflight (`OPTIONS`) permits:
 - `Access-Control-Allow-Methods: GET, POST, PUT, PATCH, DELETE, OPTIONS`
-- `Access-Control-Allow-Headers: Content-Type, Authorization, X-CSRF-Token, X-Requested-With, Accept`
+- `Access-Control-Allow-Headers: Content-Type, Authorization, X-CSRF-Token, X-Auth-Mode, X-Requested-With, Accept`
 - `Access-Control-Expose-Headers: X-Request-Id, X-RateLimit-Limit, X-RateLimit-Remaining, Retry-After`
 - `Access-Control-Allow-Credentials: true` (for allowlisted origins)
 
-Protected endpoints accept either:
-1. **Bearer Token Header (Recommended for SPA):**
-   ```http
-   Authorization: Bearer <accessToken>
-   ```
-   *(If the frontend also attaches `X-CSRF-Token` on authenticated requests, CORS allows it cleanly.)*
-2. **HttpOnly Cookie + CSRF Token Header:**
-   - **Admin:** `Cookie: dtks_access_token=<accessToken>; dtks_csrf_token=<csrfToken>` + `X-CSRF-Token: <csrfToken>`
-   - **Client:** `Cookie: dtks_client_access_token=<accessToken>; dtks_client_csrf_token=<csrfToken>` + `X-CSRF-Token: <csrfToken>`
+### Cookie-First Authentication & Bearer Opt-In
+1. **Default Cookie Mode (`authMode: "cookie"`) — Recommended for Browser SPAs (`DTKS`):**
+   - `POST /auth/login`, `POST /auth/refresh`, `POST /client/auth/login`, and `POST /client/auth/refresh` omit `accessToken` and `refreshToken` from the JSON response body and issue host-only `HttpOnly; SameSite=Lax; Secure` cookies:
+     - **Admin:** `dtks_access` (`Path=/api/v1`), `dtks_refresh` (`Path=/api/v1/auth`), `dtks_csrf` (`Path=/api/v1`)
+     - **Client:** `dtks_client_access` (`Path=/api/v1`), `dtks_client_refresh` (`Path=/api/v1/client/auth`), `dtks_client_csrf` (`Path=/api/v1`)
+   - Call `GET /api/v1/auth/csrf` or `GET /api/v1/client/auth/csrf` before mutating cookie requests (or use the `csrfToken` returned in `/login` and `/refresh` JSON).
+   - Send `credentials: 'include'` and header `X-CSRF-Token: <csrfToken>` on **all** cookie-authenticated `POST`, `PUT`, `PATCH`, and `DELETE` requests (including `/logout`, `/refresh`, and cookie-authenticated `POST /api/v1/orders`). Missing/mismatched tokens return `403 CSRF_VALIDATION_FAILED`.
+2. **Bearer Opt-In Mode (`X-Auth-Mode: bearer`) — For CLI, Mobile & Automated API Clients:**
+   - Send header `X-Auth-Mode: bearer` on `/login` and `/refresh` to receive `accessToken` and `refreshToken` in JSON and authenticate subsequent calls with `Authorization: Bearer <accessToken>`.
 
 > **Strict Token Isolation:** Admin JWTs (`accountType: "admin"`) are rejected by all `/api/v1/client/*` routes (`401`), and Client JWTs (`accountType: "client"`) are rejected by all Admin routes (`401`).
 
-### Token Storage Assessment & Planned HttpOnly Cookie Migration
-
-Currently, login/refresh endpoints return `accessToken`, `refreshToken`, and `csrfToken` in JSON for SPA Bearer/sessionStorage transport (compatible with cross-origin Cloudflare Workers deployments and the current DTKS frontend), while `authenticateAdmin` and `authenticateClient` **already** support HttpOnly cookie + CSRF double-submit header authentication. Moving away from browser `sessionStorage` to pure HttpOnly cookies requires a coordinated two-repository release:
-
-1. Add `Set-Cookie` headers (`HttpOnly; Secure; SameSite=Lax` or `None` if cross-site, scoped `Path=/api/v1`) and omit raw tokens from JSON only when clients opt in via cookie mode (e.g. `X-Auth-Transport: cookie`).
-2. Add cookie clearing (`Max-Age=0`) on `/auth/logout` and `/client/auth/logout`.
-3. Update the `DTKS` frontend API client to send `credentials: 'include'` + `X-CSRF-Token` and remove `sessionStorage` token storage once verified in staging.
+> **Refresh Replay Detection:** Reusing an already rotated refresh token (`revoke_reason = 'rotated'`) immediately revokes **all** refresh sessions and increments `token_version` (`401 REFRESH_TOKEN_REPLAY_DETECTED`), while single-device logout (`revoke_reason = 'logout'`) preserves sibling device sessions.
 
 ---
 
@@ -116,119 +118,47 @@ Currently, login/refresh endpoints return `accessToken`, `refreshToken`, and `cs
 
 ### 4.1 Authentication (`/api/v1/auth`)
 
-#### `POST /api/v1/auth/login`
-Authenticates an active administrator, verifies the WebCrypto PBKDF2-HMAC-SHA512 (`$pbkdf2-sha512$v=1$i=100000$...`) password hash in constant time (transparently migrating legacy `$argon2id$` hashes on login), updates `last_login_at`, creates a hashed session in `refresh_sessions`, and returns a short-lived access token (`15m`) + refresh token (`7d`).
+#### `GET /api/v1/auth/csrf`
+Issues a host-only `HttpOnly` `dtks_csrf` cookie (`Path=/api/v1`) and returns `{ csrfToken }` for double-submit CSRF protection.
 
-- **Rate Limit:** 10 requests / 15 minutes per IP (distributed across isolates via D1 `rate_limits`).
-- **Request Body:**
-  ```json
-  {
-    "email": "admin@dreamtechkashmirsolutions.studio",
-    "password": "<YOUR_ADMIN_PASSWORD>"
-  }
-  ```
-- **Response (`200 OK`):**
-  ```json
-  {
-    "success": true,
-    "message": "Authentication successful.",
-    "data": {
-      "accessToken": "eyJhbGciOiJIUzI1NiIs...",
-      "refreshToken": "eyJhbGciOiJIUzI1NiIs...",
-      "csrfToken": "c9f1...",
-      "expiresIn": 900,
-      "admin": {
-        "id": "adm-dtks-initial",
-        "name": "DreamTech Kashmir Admin",
-        "email": "admin@dreamtechkashmirsolutions.studio",
-        "role": "super_admin",
-        "is_active": true,
-        "last_login_at": "2026-11-14T08:00:00.000Z"
-      }
-    }
-  }
-  ```
+#### `POST /api/v1/auth/login`
+Authenticates an active administrator, verifies the WebCrypto PBKDF2-HMAC-SHA512 (`$pbkdf2-sha512$v=1$i=100000$...`) password hash in constant time (transparently migrating legacy `$argon2id$` hashes on login), updates `last_login_at`, creates a hashed session in `refresh_sessions`, and sets HttpOnly auth cookies (or returns `accessToken`/`refreshToken` JSON when `X-Auth-Mode: bearer` is sent).
+
+- **Rate Limit:** 10 requests / 15 minutes per IP (fail-closed in production via D1 `rate_limits`).
 
 #### `POST /api/v1/auth/refresh`
-Validates a refresh token against `refresh_sessions`, revokes the old session (`revoked_at`), and issues a new access token + rotated refresh token.
-- **Request Body:** `{ "refreshToken": "<refreshToken>" }`
+Validates a refresh token (cookie or JSON body when `X-Auth-Mode: bearer`), revokes the old session (`revoke_reason = 'rotated'`), and issues rotated tokens. Enforces `X-CSRF-Token` for cookie-mode requests and triggers full session cascade revocation (`401 REFRESH_TOKEN_REPLAY_DETECTED`) if a rotated token is replayed.
 
 #### `POST /api/v1/auth/logout`
-Revokes a single `refreshToken` (`allDevices: false`, `scope: "single_device"`) or revokes all active sessions + increments `token_version` (`allDevices: true` with authenticated admin session, `scope: "all_devices"`). Returns `{ loggedOut, allDevices, scope, sessionsRevoked }`.
+Enforces `X-CSRF-Token` when cookie-authenticated. Revokes a single session (`revoke_reason = 'logout'`, `scope: "single_device"`) or all active sessions + increments `token_version` (`allDevices: true` with authenticated admin session, `scope: "all_devices"`), and clears admin cookies (`Max-Age=0`).
 
 #### `GET /api/v1/auth/me`
-- **Auth Required:** Yes (`BearerAuth` - Admin)
+- **Auth Required:** Yes (Admin cookie or `BearerAuth`)
 - **Response (`200 OK`):** Current administrator profile.
 
 #### `PATCH /api/v1/auth/profile`
-- **Auth Required:** Yes (`BearerAuth` - Admin)
+- **Auth Required:** Yes (Admin cookie + CSRF or `BearerAuth`)
 - **Request Body:** `{ "name": "Updated Admin Name" }`
 - **Security:** Rejects `role`, `isActive`, `email`, `id`, `password`, or `password_hash` with `400 VALIDATION_ERROR`.
 
 #### `POST /api/v1/auth/change-password`
-- **Auth Required:** Yes (`BearerAuth` - Admin)
-- **Request Body:**
-  ```json
-  {
-    "currentPassword": "OldPassword123!",
-    "newPassword": "NewSecurePassword2026!",
-    "confirmPassword": "NewSecurePassword2026!"
-  }
-  ```
-- **Behavior:** Re-hashes password, increments `token_version` (invalidating active tokens), and revokes all prior refresh sessions in `refresh_sessions`.
+- **Auth Required:** Yes (Admin cookie + CSRF or `BearerAuth`)
+- **Password Policy:** Minimum `12` characters (max `128`), mixed case, digit, symbol, weak-denylist checked.
+- **Behavior:** Re-hashes password, increments `token_version`, revokes all `refresh_sessions`, and clears cookies.
 
 #### `POST /api/v1/auth/accept-invite`
-- **Auth Required:** Public (Rate-limited: 20 req / 15 min per IP)
-- **Request Body:**
-  ```json
-  {
-    "token": "<rawInviteToken>",
-    "password": "StrongAdminPassword#2026",
-    "confirmPassword": "StrongAdminPassword#2026"
-  }
-  ```
-- **Behavior:** Validates single-use SHA-256-hashed invitation token (48h expiry), hashes strong password, sets `is_active = 1` and `invite_accepted_at`, marks token used, and logs `ADMIN_INVITE_ACCEPTED`.
+- **Auth Required:** Public (Rate-limited: 20 req / 15 min per IP, fail-closed in prod)
+- **Delivery Format:** Invitation email directs to `${APP_URL}/admin/accept-invite#token=<rawInviteToken>`.
+- **Behavior:** Validates single-use SHA-256-hashed invitation token (48h expiry), hashes strong `>=12`-char password, activates account, atomically marks token used (`julianday` check), and logs `ADMIN_INVITE_ACCEPTED`.
 
 #### `POST /api/v1/auth/forgot-password`
-- **Auth Required:** Public (Layered Rate Limiting: `8` req / `15m` per IP + `5` req / `15m` per HMAC-hashed normalized email across all IPs; configurable via `ADMIN_PASSWORD_RESET_*` env vars; fails closed with `503 RATE_LIMITER_UNAVAILABLE` in production if shared limiting is unavailable)
-- **Request Body:** `{ "email": "admin@dreamtechkashmirsolutions.studio" }`
-- **Response (`200 OK`):**
-  ```json
-  {
-    "success": true,
-    "message": "If an eligible administrator account exists for that email address, a password reset email has been sent.",
-    "data": { "requested": true }
-  }
-  ```
-- **Security Behavior:**
-  - Checks Resend configuration (`RESEND_API_KEY`) before database lookup (`503 EMAIL_PROVIDER_UNCONFIGURED` if unconfigured).
-  - Only active administrators who have completed initial account setup (`is_active = 1`, not pending invite) receive a 1-hour single-use SHA-256-hashed reset token stored in `admin_auth_tokens` (`purpose = 'password_reset'`) and emailed via Resend with fragment link `${APP_URL}/admin/reset-password#token=<rawToken>`.
-  - If email delivery succeeds, revokes prior unused `password_reset` tokens for the same admin.
-  - If Resend delivery fails, immediately revokes the newly generated token, leaves unrelated valid tokens untouched, records an internal `ADMIN_PASSWORD_RESET_DELIVERY_FAILED` audit event (`console.error` + `activity_logs` without raw tokens), and **still returns the exact same `200 OK` response** (zero account enumeration across active, non-existent, inactive, pending-invite, or failed-delivery states).
+- **Auth Required:** Public (Layered IP `8/15m` + HMAC email `5/15m` rate limits; fail-closed in prod)
+- **Delivery Format:** `${APP_URL}/admin/reset-password#token=<rawToken>`
+- **Response (`200 OK`):** Uniform `{ requested: true }` confirmation (no enumeration across nonexistent, inactive, pending-invite, or failed-delivery states; `503 EMAIL_PROVIDER_UNCONFIGURED` if Resend is unconfigured).
 
 #### `POST /api/v1/auth/reset-password`
-- **Auth Required:** Public (Layered Rate Limiting: `8` req / `15m` per IP + `8` req / `15m` per HMAC-hashed submitted token across all IPs; configurable via `ADMIN_PASSWORD_RESET_*` env vars; fails closed with `503 RATE_LIMITER_UNAVAILABLE` in production if shared limiting is unavailable)
-- **Request Body:**
-  ```json
-  {
-    "token": "<rawResetToken>",
-    "newPassword": "NewStrongAdmin#2026!",
-    "confirmPassword": "NewStrongAdmin#2026!"
-  }
-  ```
-  *(Also accepts `password` as an alias for `newPassword`.)*
-- **Response (`200 OK`):**
-  ```json
-  {
-    "success": true,
-    "message": "Administrator password has been reset successfully. You can now sign in with your new password.",
-    "data": { "reset": true }
-  }
-  ```
-- **Security Behavior:**
-  - Validates strong password policy + matching `confirmPassword`, hashes token with SHA-256, and queries `admin_auth_tokens` exclusively (`client` tokens from `customer_auth_tokens` are rejected).
-  - Rejects invalid (`400 INVALID_RESET_TOKEN`), expired (`400 RESET_TOKEN_EXPIRED`), previously used/revoked (`400 RESET_TOKEN_USED`), inactive (`403 ACCOUNT_DEACTIVATED`), or pending-invite (`403 INVITE_PENDING`) states.
-  - Atomically claims the token inside D1 (`used_at IS NULL AND revoked_at IS NULL AND julianday(expires_at) > julianday(?)`) to enforce single-use and DB-level expiry under concurrency, updates `admins.password_hash` (`$pbkdf2-sha512$v=1$i=100000$...`), increments `admins.token_version` (immediately invalidating existing access JWTs), revokes all active `refresh_sessions`, logs `ADMIN_PASSWORD_RESET_COMPLETED`, and dispatches a non-blocking security alert email.
+- **Auth Required:** Public (Layered IP `8/15m` + HMAC token `8/15m` rate limits; fail-closed in prod)
+- **Behavior:** Enforces `12+` char password policy, atomically claims single-use token (`julianday(expires_at) > julianday(?)`), bumps `token_version`, revokes all `refresh_sessions`, and sends a non-blocking security alert email.
 
 ---
 
@@ -236,213 +166,80 @@ Revokes a single `refreshToken` (`allDevices: false`, `scope: "single_device"`) 
 
 | Method | Endpoint | Auth / Role | Description |
 | :--- | :--- | :--- | :--- |
-| `GET` | `/api/v1/admin/accounts` | `super_admin`, `admin` | List admin accounts with `activeSessionCount`, `activeSessions`, `invitePending`, `inviteExpiresAt`, `inviteExpired`, and `pagination` (`?search=`, `?role=`, `?status=all\|active\|inactive\|pending\|expired`, `?isActive=`, `?page=`, `?limit=`) |
-| `GET` | `/api/v1/admin/accounts/:id` | `super_admin`, `admin` | Inspect admin account, recent refresh sessions, `activeSessions`, `inviteExpiresAt`, `inviteExpired`, and latest invitation metadata |
-| `POST` | `/api/v1/admin/accounts` | `super_admin` only | Create pending admin account (`isActive: false`) and dispatch 48h invitation email via Resend (`503` includes `adminCreated`, `invitationEmailSent`, `inviteEmailSent`, `inviteExpiresAt`, `deliveryStatus`, `account`) |
-| `POST` | `/api/v1/admin/accounts/:id/resend-invite` | `super_admin` only | Revoke prior unused invite tokens and resend fresh invitation email for pending admins |
-| `PATCH` / `PUT` | `/api/v1/admin/accounts/:id` | `super_admin` only | Update `name` and/or `role` (`super_admin`, `admin`, `editor`). Role changes revoke all sessions & bump `token_version`. Protects last active `super_admin` (`409 LAST_SUPER_ADMIN_PROTECTED`) |
-| `PATCH` / `PUT` | `/api/v1/admin/accounts/:id/status` | `super_admin` only | Activate (`{ "isActive": true }`) or deactivate (`{ "isActive": false }`) an account. Deactivation sets `deactivated_at`, bumps `token_version`, and revokes sessions. Protects last active `super_admin` |
-| `DELETE` | `/api/v1/admin/accounts/:id/sessions` | `super_admin` only | Revoke all active refresh sessions and bump `token_version` so existing access tokens fail immediately (`401 SESSION_REVOKED`) |
+| `GET` | `/api/v1/admin/accounts` | `super_admin`, `admin` | List admin accounts with filters (`?search=`, `?role=`, `?status=`, `?isActive=`, `?page=`, `?limit=`) |
+| `GET` | `/api/v1/admin/accounts/:id` | `super_admin`, `admin` | Inspect admin account, recent refresh sessions, and latest invitation metadata |
+| `POST` | `/api/v1/admin/accounts` | `super_admin` only | Create pending admin account (`isActive: false`) and dispatch 48h `#token=` invitation email via Resend |
+| `POST` | `/api/v1/admin/accounts/:id/resend-invite` | `super_admin` only | Revoke prior unused invite tokens and resend fresh `#token=` invitation email |
+| `PATCH` / `PUT` | `/api/v1/admin/accounts/:id` | `super_admin` only | Update `name` and/or `role` (protects last active `super_admin`) |
+| `PATCH` / `PUT` | `/api/v1/admin/accounts/:id/status` | `super_admin` only | Activate or deactivate an account (protects last active `super_admin`) |
+| `DELETE` | `/api/v1/admin/accounts/:id/sessions` | `super_admin` only | Revoke all active refresh sessions and bump `token_version` |
 
 ---
 
 ### 4.1C Client Registration & Authentication (`/api/v1/client/auth`)
 
-| Method | Endpoint | Auth | Rate Limit | Description |
+| Method | Endpoint | Auth | Rate Limit (Fail-Closed in Prod) | Description |
 | :--- | :--- | :--- | :--- | :--- |
-| `POST` | `/api/v1/client/auth/register` | Public | 10 / 15m | Register client account (`fullName`, `email`, `phone`, `password`, `confirmPassword`, `acceptTerms: true`, optional `city`, `businessName`, `acceptPrivacy`), persist legal acceptance timestamps/versions/IP, send 24h verification email (`503` includes `accountCreated`, `accountPendingVerification`, `canResendVerification`, `deliveryStatus`) |
-| `POST` | `/api/v1/client/auth/resend-verification` | Public | 15 / 15m | Resend verification link (`{ "email" }`); returns `503 EMAIL_DELIVERY_FAILED` / `EMAIL_PROVIDER_UNCONFIGURED` if email delivery fails, or `200 OK` otherwise |
-| `POST` | `/api/v1/client/auth/verify-email` | Public | 15 / 15m | Verify single-use SHA-256-hashed token (`{ "token" }`), activate email verification, and safely link existing `customers` + historical unlinked `orders` matching verified email |
-| `POST` | `/api/v1/client/auth/login` | Public | 10 / 15m | Authenticate verified, active client; returns `accessToken`, rotated `refreshToken`, `csrfToken`, `expiresIn`, and `client` profile |
-| `POST` | `/api/v1/client/auth/refresh` | Public | 30 / 15m | Rotate `customer_refresh_sessions` token and issue new access + refresh token pair |
-| `POST` | `/api/v1/client/auth/logout` | Client or Refresh Token | General | Single-device (`{ refreshToken }`) revokes only that session without bumping `token_version`; `{ allDevices: true }` (requires authenticated client -> `401` otherwise) revokes all sessions and increments `token_version` |
-| `GET` | `/api/v1/client/auth/me` | Client (`BearerAuth`) | General | Get current authenticated client profile (including `termsAccepted`, `termsVersion`, `privacyAccepted`, `privacyVersion`) |
-| `PATCH` | `/api/v1/client/auth/profile` | Client (`BearerAuth`) | General | Update `fullName`, `phone`, `city`, `businessName` (synced to linked `customers` row; rejects `email`, `role`, `isActive`, etc.) |
-| `POST` | `/api/v1/client/auth/change-password` | Client (`BearerAuth`) | General | Verify `currentPassword`, set strong `newPassword`, revoke all sessions, bump `token_version`, and send security notification email |
-| `POST` | `/api/v1/client/auth/forgot-password` | Public | 8 / 15m | Issue 1h single-use SHA-256-hashed password reset token via Resend (`503` if unconfigured or delivery fails; otherwise uniform `200 OK`) |
-| `POST` | `/api/v1/client/auth/reset-password` | Public | 8 / 15m | Consume single-use reset token (`token`, `password` or `newPassword`, `confirmPassword`), revoke all sessions, bump `token_version`, and send security notification email |
-| `POST` | `/api/v1/client/auth/deactivate` | Client (`BearerAuth`) | General | Confirm `password`, deactivate account (`isActive: false`), revoke all sessions, bump `token_version`, and send security alert email |
+| `GET` | `/api/v1/client/auth/csrf` | Public | General | Issues host-only `HttpOnly` `dtks_client_csrf` cookie + `{ csrfToken }` |
+| `POST` | `/api/v1/client/auth/register` | Public | `10 / 15m` IP + `5 / 15m` HMAC email | Register client (`>=12`-char strong password, legal consent), send 24h `#token=` verification email |
+| `POST` | `/api/v1/client/auth/resend-verification` | Public | `6 / 15m` IP + `4 / 15m` HMAC email | Uniform `200 OK` `{ requested: true }` anti-enumeration; targeted token revocation preserves prior unused token on delivery failure |
+| `POST` | `/api/v1/client/auth/verify-email` | Public | `15 / 15m` IP + `10 / 15m` HMAC token | Atomic single-use claim (`julianday`), verifies email, safely links existing `customers` + historical pre-registration `orders` (`orders.created_at <= account.created_at`) |
+| `POST` | `/api/v1/client/auth/login` | Public | `10 / 15m` IP | Sets `HttpOnly` cookies (`authMode: "cookie"`) or returns JSON tokens with `X-Auth-Mode: bearer` |
+| `POST` | `/api/v1/client/auth/refresh` | Public / CSRF | `30 / 15m` IP | Cookie + `X-CSRF-Token` or `X-Auth-Mode: bearer`; rotated-token reuse triggers cascade revocation (`REFRESH_TOKEN_REPLAY_DETECTED`) |
+| `POST` | `/api/v1/client/auth/logout` | Client + CSRF | General | Single-device (`revoke_reason = 'logout'`) or `allDevices: true` revocation; clears client cookies |
+| `GET` | `/api/v1/client/auth/me` | Client | General | Get current authenticated client profile |
+| `PATCH` | `/api/v1/client/auth/profile` | Client + CSRF | General | Update `fullName`, `phone`, `city`, `businessName` |
+| `POST` | `/api/v1/client/auth/change-password` | Client + CSRF | General | Enforces `12+`-char password, bumps `token_version`, revokes sessions, clears cookies, sends non-blocking alert |
+| `POST` | `/api/v1/client/auth/forgot-password` | Public | `8 / 15m` IP + `5 / 15m` HMAC email | Dispatches `#token=` 1h reset link; uniform `200 OK` `{ requested: true }`; targeted token revocation on failure |
+| `POST` | `/api/v1/client/auth/reset-password` | Public | `8 / 15m` IP + `8 / 15m` HMAC token | Atomic claim (`julianday`), enforces `12+`-char password, bumps `token_version`, revokes sessions, sends non-blocking alert |
+| `POST` | `/api/v1/client/auth/deactivate` | Client + CSRF | General | Verifies password, deactivates account, revokes sessions, bumps `token_version`, sends non-blocking alert |
 
 ---
 
 ### 4.1D Client-Only Data Access (`/api/v1/client`)
 
-All endpoints require a valid **Client** JWT (`authenticateClient`) and strictly scope records to `client.customerId`. Internal fields (`admin_notes`, `changed_by_admin_id`) are never returned.
+All endpoints require a valid **Client** session (`authenticateClient`) and strictly scope records to `client.customerId`. Unauthenticated guest orders use `customer_id = NULL` and never leak into verified client portals.
 
-| Method | Endpoint | Auth | Description |
-| :--- | :--- | :--- | :--- |
-| `GET` | `/api/v1/client/orders` | Client | List authenticated client's orders (supports `?status=` and `?search=`) |
-| `GET` | `/api/v1/client/orders/:id` | Client | Get single client order by ID or `order_number`, including line items and sanitized `statusHistory` (`404` if not owned by client) |
-| `GET` | `/api/v1/client/quotations` | Client | List client orders with quotations (`quotationAmount`, `quotationCurrency`, `quotationNotes`, `expectedDeliveryDate`, `expectedTimeline`, `customerUpdate`) |
-| `GET` | `/api/v1/client/projects` | Client | List client active/completed project records (`Approved`, `InProgress`, `Development`, `Completed`, plus technical scope & `customerUpdate`) |
+- `GET /api/v1/client/orders`
+- `GET /api/v1/client/orders/:id`
+- `GET /api/v1/client/quotations`
+- `GET /api/v1/client/projects`
 
 ---
 
-### 4.2 Services Management (`/api/v1/services`)
+### 4.2 Services, Packages, Portfolio & R2 Media
 
-| Method | Endpoint | Auth | Description |
-| :--- | :--- | :--- | :--- |
-| `GET` | `/api/v1/services` | Public (Admin sees inactive with `?includeInactive=true`) | List website services ordered by `display_order ASC` |
-| `GET` | `/api/v1/services/:slugOrId` | Public | Get single service by `slug` or `id` |
-| `POST` | `/api/v1/services` | Admin (All roles) | Create a new website service |
-| `PUT` | `/api/v1/services` | Admin (`super_admin`, `admin`) | Bulk sync/upsert website services catalog (accepts a raw JSON array `[...]` or `{ "services": [...] }`) |
-| `PUT` / `PATCH` | `/api/v1/services/:slugOrId` | Admin (All roles) | Update an existing service |
-| `DELETE` | `/api/v1/services/:slugOrId` | Admin (`super_admin`, `admin`) | Delete a service |
-
-- **Create/Update Request Body Example:**
-  ```json
-  {
-    "title": "Custom Web Portals & Dashboards",
-    "slug": "custom-web-portals-dashboards",
-    "description": "End-to-end architecture and responsive development for custom web portals.",
-    "features": ["Role-based access", "Fast search & reporting", "Responsive layout"],
-    "image": "/assets/images/dtks-corporate-website-showcase.jpg",
-    "price": 38000,
-    "is_active": true,
-    "display_order": 11
-  }
-  ```
+- `GET / POST / PUT /api/v1/services`, `GET / PUT / PATCH / DELETE /api/v1/services/:slugOrId` — validates URL safety (`isSafeUrl`) on `image`.
+- `GET / POST /api/v1/packages`, `GET / PUT / PATCH / DELETE /api/v1/packages/:id`, `GET / PUT /api/v1/packages/config/maintenance`, `GET / PUT /api/v1/packages/config/addons`.
+- `GET / POST /api/v1/portfolio`, `GET / PUT / PATCH / DELETE /api/v1/portfolio/:slugOrId` — validates URL safety (`isSafeUrl`) on `thumbnail`, `images[]`, `projectUrl`, `githubUrl`, and `demoVideoUrl`.
+- `POST /api/v1/portfolio/upload` — Admin + CSRF; pre-reads `Content-Length`, `file.size`, and base64 length against 5MB limit (`413 PAYLOAD_TOO_LARGE`); validates `folder`/`entityType` and `replaceKey` (`^(portfolio|services|team|general)\/[a-zA-Z0-9._-]+$`, returning `400 INVALID_ASSET_KEY` on invalid `replaceKey`).
+- `DELETE /api/v1/portfolio/upload`, `DELETE /api/v1/portfolio/upload/:key` — Super Admin / Admin + CSRF.
+- `GET /api/v1/uploads/:key`, `GET /api/v1/assets/:key` — Serves R2 object with `X-Content-Type-Options: nosniff`, `Content-Security-Policy: default-src 'none'; ...`, `Cross-Origin-Resource-Policy: cross-origin`, `Cache-Control: public, max-age=31536000, immutable`.
 
 ---
 
-### 4.3 Packages & Configuration (`/api/v1/packages`)
+### 4.3 Website Order Management (`/api/v1/orders`)
 
 | Method | Endpoint | Auth | Description |
 | :--- | :--- | :--- | :--- |
-| `GET` | `/api/v1/packages` | Public | List packages along with `maintenancePlans` and `addons` (supports `?service_id=`, `?category=`, `?includeInactive=true`) |
-| `GET` | `/api/v1/packages/:id` | Public | Get package details by ID |
-| `POST` | `/api/v1/packages` | Admin (All roles) | Create a website package |
-| `PUT` / `PATCH` | `/api/v1/packages/:id` | Admin (All roles) | Update a website package |
-| `DELETE` | `/api/v1/packages/:id` | Admin (`super_admin`, `admin`) | Delete a website package |
-| `GET` | `/api/v1/packages/config/maintenance` | Public | Get stored website maintenance plans configuration |
-| `PUT` | `/api/v1/packages/config/maintenance` | Admin (`super_admin`, `admin`) | Update maintenance plans configuration (accepts a raw JSON array `[...]` or `{ "maintenancePlans": [...] }`) |
-| `GET` | `/api/v1/packages/config/addons` | Public | Get stored optional website add-ons configuration |
-| `PUT` | `/api/v1/packages/config/addons` | Admin (`super_admin`, `admin`) | Update optional add-ons configuration (accepts a raw JSON array `[...]` or `{ "addons": [...] }`) |
-
-- **Create/Update Request Body Example:**
-  ```json
-  {
-    "name": "Business Website Package",
-    "service_id": "svc-business-websites",
-    "category": "Business & Corporate Websites",
-    "description": "Complete multi-page website for established companies.",
-    "price": 16500,
-    "features": ["Up to 10 Custom Pages", "Technical SEO Setup", "Lead Capture Forms"],
-    "is_active": true,
-    "display_order": 2
-  }
-  ```
+| `POST` | `/api/v1/orders` | Optional Client Cookie + CSRF (Rate-limited `15 / 10m`) | Creates order; guest orders set `customer_id = NULL` (never attaching to existing client accounts); issues a 256-bit `trackingToken` (`sha256Hex` in `order_tracking_tokens`, 90d TTL) and emails `#token=` tracking link |
+| `POST` | `/api/v1/orders/track` | Public (Rate-limited IP `20/15m` + HMAC token `15/15m`) | Validates `{ "token": "..." }` against `order_tracking_tokens` and returns non-PII `status`/`statusHistory` summary (uniform `404 ORDER_NOT_FOUND` on invalid/expired/revoked tokens) |
+| `GET` | `/api/v1/orders/track` | Public | Deprecated -> `410 LEGACY_TRACKING_DISABLED` |
+| `GET / PATCH / PUT / DELETE` | `/api/v1/orders*` | Admin (+ CSRF) | Full admin order workflow & RBAC (`super_admin`, `admin` for `DELETE`) |
 
 ---
 
-### 4.4 Portfolio & Cloudflare R2 Media (`/api/v1/portfolio`, `/api/v1/uploads`)
+### 4.4 Contact, Dashboard, Site Settings, Team, Testimonials & Bootstrap
 
-| Method | Endpoint | Auth | Description |
-| :--- | :--- | :--- | :--- |
-| `GET` | `/api/v1/portfolio` | Public | List published portfolio items (supports `?category=`, `?page=1&limit=10`, `?includeUnpublished=true`) |
-| `GET` | `/api/v1/portfolio/:slugOrId` | Public | Get portfolio project by `slug` or `id` |
-| `POST` | `/api/v1/portfolio` | Admin (All roles) | Create portfolio project |
-| `PUT` / `PATCH` | `/api/v1/portfolio/:slugOrId` | Admin (All roles) | Update portfolio project (replaces old R2 thumbnail if changed) |
-| `DELETE` | `/api/v1/portfolio/:slugOrId` | Admin (`super_admin`, `admin`) | Delete portfolio project and clean up R2 images |
-| `POST` | `/api/v1/portfolio/upload` | Admin (All roles) | Upload JPEG/PNG/WebP image (max 5MB, magic-byte verified) to R2; accepts `folder` or `entityType` (`portfolio`, `services`, `team`, `general`), plus `replaceKey`; returns `{ id, key, url, publicUrl, mimeType, sizeBytes }` |
-| `DELETE` | `/api/v1/portfolio/upload` | Admin (`super_admin`, `admin`) | Delete image from R2 by `?key=`, JSON `{ "key": "..." }` / `{ "url": "..." }`, or `/api/v1/portfolio/upload/:encodedKeyOrUrl` (`400 INVALID_ASSET_KEY` on malformed URI encoding or path traversal) |
-| `GET` | `/api/v1/uploads/:key` & `/api/v1/assets/:key` | Public | Stream uploaded image asset from Cloudflare R2 |
-
----
-
-### 4.5 Website Order Management (`/api/v1/orders`)
-
-| Method | Endpoint | Auth | Description |
-| :--- | :--- | :--- | :--- |
-| `POST` | `/api/v1/orders` | Public (Rate-limited) | Submit website order request; creates/updates customer, generates `DKS-YYYY-XXXX`, sets status `Pending` |
-| `GET` | `/api/v1/orders/track` | Public | Track order by `?ref=DKS-2026-0001&email=customer@example.com` |
-| `GET` | `/api/v1/orders` | Admin | List orders (supports `?status=`, `?service=`, `?search=`) |
-| `GET` | `/api/v1/orders/:id` | Admin | Get full order details, line items, and status history |
-| `PATCH` / `PUT` | `/api/v1/orders/:id/status` | Admin (All roles) | Update order status (`Pending`, `New Request`, `Reviewed`, `Under Review`, `Requirements Clarification`, `Quotation Sent`, `Awaiting Customer Approval`, `Approved`, `InProgress`, `In Progress`, `Under Testing`, `Completed`, `Rejected`, `Cancelled`) |
-| `PATCH` / `PUT` | `/api/v1/orders/:id` | Admin (All roles) | Update order status, quotation amount, timeline, and admin notes |
-| `DELETE` | `/api/v1/orders/:id` | Admin (`super_admin`, `admin`) | Delete an order |
-
-- **Public Order Submission (`POST /api/v1/orders`) Example:**
-  ```json
-  {
-    "service_id": "svc-ecommerce-websites",
-    "package_id": "pkg-ecommerce-store",
-    "customer_name": "Tariq Ahmad",
-    "customer_email": "tariq.ahmad@example.com",
-    "customer_phone": "+91 97971 23456",
-    "project_name": "Kashmir Pashmina Online Storefront",
-    "project_description": "Direct-to-consumer storefront for authentic Kashmiri Pashmina shawls with catalog filters.",
-    "budget": "₹30,000 – ₹60,000"
-  }
-  ```
-
----
-
-### 4.6 Contact & Inquiry Management (`/api/v1/contact`)
-
-| Method | Endpoint | Auth | Description |
-| :--- | :--- | :--- | :--- |
-| `POST` | `/api/v1/contact` | Public (Rate-limited) | Submit contact message (validates fields, sanitizes XSS, checks honeypot) |
-| `GET` | `/api/v1/contact` | Admin (All roles) | List & search contact messages (`?status=`, `?search=`) |
-| `GET` | `/api/v1/contact/:id` | Admin (All roles) | View single contact message |
-| `PATCH` / `PUT` | `/api/v1/contact/:id` | Admin (All roles) | Update message status (`New`, `Read`, `In Review`, `Replied`, `Archived`) and `admin_notes` |
-| `DELETE` | `/api/v1/contact/:id` | Admin (`super_admin`, `admin`) | Delete contact message |
-
----
-
-### 4.7 Admin Dashboard, Customers & Analytics (`/api/v1/admin/*`, `/api/v1/customers`)
-
-| Method | Endpoint | Auth | Description |
-| :--- | :--- | :--- | :--- |
-| `GET` | `/api/v1/admin/dashboard/stats` | Admin (All roles) | Real-time counts from D1 (`totalOrders`, `pendingOrders`, `completedOrders`, `totalCustomers`, `totalContactMessages`, `activeServices`, `activePackages`, `totalPortfolioItems`) |
-| `GET` | `/api/v1/admin/dashboard/recent-orders` | Admin (All roles) | Latest orders (`?limit=5`) |
-| `GET` | `/api/v1/admin/dashboard/recent-messages` | Admin (All roles) | Latest contact inquiries (`?limit=5`) |
-| `GET` | `/api/v1/admin/dashboard/order-analytics` | Admin (All roles) | Aggregated order counts & quoted values grouped by status, service, hosting preference, and month |
-| `GET` | `/api/v1/customers` | Admin (All roles) | List customer records with aggregated order counts (linked by `customer_id` or legacy unlinked email) |
-| `GET` | `/api/v1/customers/:id` | Admin (All roles) | Inspect single customer record and associated orders |
-| `GET` | `/api/v1/admin/activity-logs` | Admin (`super_admin`, `admin`) | Audit trail of admin actions, logins, hash migrations, and transactional email delivery logs (`?limit=50`) |
-| `GET` | `/api/v1/admin/notifications` | Admin (`super_admin`, `admin`) | Recent admin notifications derived from live database activity |
-
----
-
-### 4.8 Site Settings, Team, Testimonials & Bootstrap
-
-| Method | Endpoint | Auth | Description |
-| :--- | :--- | :--- | :--- |
-| `GET` | `/api/v1/bootstrap` | Public | Combined public website payload (services, packages, maintenancePlans, addons, portfolio, settings, team, testimonials) |
-| `GET` | `/api/v1/settings` | Public | Returns public site settings with sensitive & prototype keys stripped recursively |
-| `PUT` / `PATCH` | `/api/v1/settings` | Admin (`super_admin`, `admin`) | Deep-sanitizes and updates site settings in `site_settings` |
-| `GET` | `/api/v1/team` | Public (Admin sees hidden with `?includeHidden=true`) | List team members ordered by `sortOrder` (includes `order` compatibility alias) |
-| `POST` | `/api/v1/team` | Admin (All roles) | Add a team member |
-| `PATCH` / `PUT` | `/api/v1/team/:id` | Admin (All roles) | Update team member (whitelisted, XSS-sanitized fields only) |
-| `POST` / `PATCH` | `/api/v1/team/:id/reorder` | Admin (All roles) | Move team member `up` or `down` in display order |
-| `DELETE` | `/api/v1/team/:id` | Admin (`super_admin`, `admin`) | Remove team member |
-| `GET` | `/api/v1/testimonials` | Public | List published client testimonials |
-| `POST` | `/api/v1/testimonials` | Admin (All roles) | Create client testimonial |
-| `DELETE` | `/api/v1/testimonials/:id` | Admin (`super_admin`, `admin`) | Delete client testimonial |
+- `POST /api/v1/contact` (Rate-limited `15 / 10m`), `GET / PATCH / PUT / DELETE /api/v1/contact/:id` (Admin).
+- `GET /api/v1/admin/dashboard/stats`, `/recent-orders`, `/recent-messages`, `/order-analytics`, `/customers`, `/customers/:id`, `/admin/activity-logs`, `/admin/notifications`.
+- `GET /api/v1/team`, `GET /api/v1/testimonials`, `GET /api/v1/bootstrap` — **Visibility Isolation:** public callers see only visible team members (`visible !== false`) and approved testimonials (`isApproved !== false`); hidden/unapproved records require an authenticated Admin session AND `?includeInactive=true` or `?all=true`. Team avatar/social URLs are validated with `isSafeUrl`.
 
 ---
 
 ## 5. Role-Based Access Control (RBAC)
 
-| Actor / Role | Permitted Actions | Restricted Actions |
-| :--- | :--- | :--- |
-| `super_admin` | Full access to all admin & workspace endpoints **plus** `/api/v1/admin/accounts` creation (invite), role changes, activation/deactivation, resend invites, and session revocation | Cannot demote or deactivate the last active `super_admin` (`409 LAST_SUPER_ADMIN_PROTECTED`); cannot access `/api/v1/client/*` (`401`) |
-| `admin` | Full workspace access (`DELETE`, `PUT /settings`, package configs, activity logs, notifications) and **read-only** `GET /api/v1/admin/accounts` & `GET /api/v1/admin/accounts/:id` | Cannot create admins (`POST /admin/accounts`), edit roles/statuses (`PATCH`), resend invites, or revoke sessions (`403 FORBIDDEN`); cannot access `/api/v1/client/*` (`401`) |
-| `editor` | Create and update services, packages, portfolio items, R2 uploads, order status/quotations, and contact inquiry statuses | Cannot `DELETE` services, packages, portfolio items, R2 objects, orders, or inquiries; cannot `PUT /api/v1/settings` or `PUT /api/v1/packages/config/*`; cannot view `/api/v1/admin/activity-logs`, `/api/v1/admin/notifications`, or `/api/v1/admin/accounts*` (`403 FORBIDDEN`) |
-| `client` | Self-service `/api/v1/client/auth/*` (profile, change-password, deactivate, refresh, logout) and client-scoped `/api/v1/client/orders*`, `/quotations`, `/projects`, plus authenticated `POST /api/v1/orders` | Completely isolated from all Admin endpoints (`/api/v1/auth/*`, `/api/v1/admin/*`, admin mutations on services/packages/portfolio/orders/contact/settings -> `401`); cannot access another client's orders (`404`) |
-
----
-
-## 6. How the Separate Frontend (`DTKS`) Consumes the API
-
-The standalone frontend repository (`https://github.com/shahnaveed07/DTKS.git`) connects to this backend by setting:
-
-```env
-VITE_API_BASE_URL=https://api.dreamtechkashmirsolutions.studio/api/v1
-```
-(or `https://dreamtechkashmirsolutions.studio/api/v1` when using the same-origin Cloudflare Worker route).
-
-- **Public Pages** (`Home`, `Services`, `Packages`, `Portfolio`, `Order Form`, `Track Order`, `Contact`) call `GET /api/v1/bootstrap` (or individual `GET /services`, `GET /packages`, `GET /portfolio`, `GET /settings`), `POST /api/v1/orders`, `GET /api/v1/orders/track`, and `POST /api/v1/contact`.
-- **Admin Dashboard & Management Screens** authenticate via `POST /api/v1/auth/login`, attach `Authorization: Bearer <accessToken>` on protected requests, automatically refresh short-lived access tokens via `POST /api/v1/auth/refresh`, and manage services, packages, portfolio items (with `multipart/form-data` R2 image uploads to `POST /api/v1/portfolio/upload`), customer orders, inquiries, and site settings.
-
+- `super_admin`: Full workspace access + `/admin/accounts` creation/invites/roles/statuses/session revocation (protects last active `super_admin`).
+- `admin`: Full workspace access (`DELETE`, `PUT /settings`, `PUT /services`, configs, audit logs, notifications) + read-only `/admin/accounts`.
+- `editor`: Create/update services, packages, portfolio, R2 uploads, orders, inquiries, team, testimonials; `403 Forbidden` on `DELETE`, bulk `PUT /services`, `PUT /packages/config/*`, `PUT /settings`, audit logs, notifications, and `/admin/accounts*`.
+- `client`: Isolated to `/api/v1/client/*` and authenticated `POST /api/v1/orders`.

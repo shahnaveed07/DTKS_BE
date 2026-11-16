@@ -6,3 +6,9 @@ coverage/
 *.log
 .env*
 !.env.example
+.wrangler/
+backend/.wrangler/
+data/
+backend/data/
+.dev.vars*
+!.dev.vars.example

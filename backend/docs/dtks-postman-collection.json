@@ -42,10 +42,20 @@
       "name": "1. Authentication",
       "item": [
         {
-          "name": "Admin Login",
+          "name": "Admin CSRF Token (/auth/csrf)",
+          "request": {
+            "method": "GET",
+            "url": "{{baseUrl}}/auth/csrf"
+          }
+        },
+        {
+          "name": "Admin Login (Bearer Opt-In)",
           "request": {
             "method": "POST",
-            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "header": [
+              { "key": "Content-Type", "value": "application/json" },
+              { "key": "X-Auth-Mode", "value": "bearer" }
+            ],
             "url": "{{baseUrl}}/auth/login",
             "body": {
               "mode": "raw",
@@ -65,7 +75,10 @@
           "name": "Rotate Refresh Token (/auth/refresh)",
           "request": {
             "method": "POST",
-            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "header": [
+              { "key": "Content-Type", "value": "application/json" },
+              { "key": "X-Auth-Mode", "value": "bearer" }
+            ],
             "url": "{{baseUrl}}/auth/refresh",
             "body": {
               "mode": "raw",
@@ -275,10 +288,15 @@
           }
         },
         {
-          "name": "Track Order Status (Public)",
+          "name": "Track Order Status (Public Token)",
           "request": {
-            "method": "GET",
-            "url": "{{baseUrl}}/orders/track?ref=DKS-2026-0001&email=imran.qadri@zabarwanretreat.example.com"
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "url": "{{baseUrl}}/orders/track",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"token\": \"<64-char-private-tracking-token>\"\n}"
+            }
           }
         },
         {
@@ -469,14 +487,24 @@
           }
         },
         {
-          "name": "Client Login",
+          "name": "Client CSRF Token (/client/auth/csrf)",
+          "request": {
+            "method": "GET",
+            "url": "{{baseUrl}}/client/auth/csrf"
+          }
+        },
+        {
+          "name": "Client Login (Bearer Opt-In)",
           "request": {
             "method": "POST",
-            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "header": [
+              { "key": "Content-Type", "value": "application/json" },
+              { "key": "X-Auth-Mode", "value": "bearer" }
+            ],
             "url": "{{baseUrl}}/client/auth/login",
             "body": {
               "mode": "raw",
-              "raw": "{\n  \"email\": \"amina@example.com\",\n  \"password\": \"ClientPass#2026!\"\n}"
+              "raw": "{\n  \"email\": \"amina@example.com\",\n  \"password\": \"ClientPass#2026!Strong\"\n}"
             }
           }
         },
@@ -501,10 +529,13 @@
           }
         },
         {
-          "name": "Client Refresh Token",
+          "name": "Client Refresh Token (Bearer Opt-In)",
           "request": {
             "method": "POST",
-            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "header": [
+              { "key": "Content-Type", "value": "application/json" },
+              { "key": "X-Auth-Mode", "value": "bearer" }
+            ],
             "url": "{{baseUrl}}/client/auth/refresh",
             "body": {
               "mode": "raw",

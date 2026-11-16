@@ -1,5 +1,18 @@
-import { verifyJwt } from '../utils/crypto.js';
+import {
+  generateRandomToken,
+  timingSafeEqualStrings,
+  verifyJwt,
+} from '../utils/crypto.js';
 import { errorResponse } from '../utils/response.js';
+import { isProductionEnv } from '../config/cors.js';
+import {
+  ADMIN_ACCESS_COOKIE_NAME,
+  ADMIN_REFRESH_COOKIE_NAME,
+  ADMIN_CSRF_COOKIE_NAME,
+  CLIENT_ACCESS_COOKIE_NAME,
+  CLIENT_REFRESH_COOKIE_NAME,
+  CLIENT_CSRF_COOKIE_NAME,
+} from '../config/constants.js';
 
 /**
  * Retrieves the configured JWT signing secret.
@@ -33,6 +46,22 @@ export function getJwtSecret(env = {}) {
   return configured || 'dtks-local-dev-only-ephemeral-hmac-secret-key-2026';
 }
 
+export function isHttpsRequest(request) {
+  try {
+    const url = new URL(request.url);
+    return (
+      url.protocol === 'https:' ||
+      String(request.headers.get('X-Forwarded-Proto') || '').toLowerCase() === 'https'
+    );
+  } catch {
+    return false;
+  }
+}
+
+export function isBearerModeRequested(request) {
+  return String(request.headers.get('X-Auth-Mode') || '').trim().toLowerCase() === 'bearer';
+}
+
 export function parseCookies(cookieHeader = '') {
   const out = {};
   for (const pair of String(cookieHeader).split(';')) {
@@ -50,14 +79,196 @@ export function parseCookies(cookieHeader = '') {
   return out;
 }
 
-function validateCookieCsrf(request, cookies, csrfCookieName) {
+export function formatSetCookieHeader(
+  name,
+  value,
+  {
+    maxAge = 0,
+    path = '/api/v1',
+    httpOnly = true,
+    sameSite = 'Lax',
+    secure = false,
+  } = {}
+) {
+  const parts = [
+    `${name}=${encodeURIComponent(String(value ?? ''))}`,
+    `Path=${path}`,
+    `SameSite=${sameSite}`,
+    `Max-Age=${Math.max(0, Math.floor(Number(maxAge) || 0))}`,
+  ];
+  if (maxAge <= 0) {
+    parts.push('Expires=Thu, 01 Jan 1970 00:00:00 GMT');
+  }
+  if (httpOnly) {
+    parts.push('HttpOnly');
+  }
+  if (secure) {
+    parts.push('Secure');
+  }
+  return parts.join('; ');
+}
+
+export function appendCookiesToResponse(response, cookieStrings = []) {
+  for (const cookie of cookieStrings) {
+    if (cookie) {
+      response.headers.append('Set-Cookie', cookie);
+    }
+  }
+  return response;
+}
+
+export function buildAdminAuthCookies(
+  request,
+  env,
+  { accessToken, refreshToken, csrfToken, accessMaxAge = 900, refreshMaxAge = 604800 }
+) {
+  const secure = isProductionEnv(env) || isHttpsRequest(request);
+  const cookies = [];
+  if (accessToken) {
+    cookies.push(
+      formatSetCookieHeader(ADMIN_ACCESS_COOKIE_NAME, accessToken, {
+        maxAge: accessMaxAge,
+        path: '/api/v1',
+        httpOnly: true,
+        sameSite: 'Lax',
+        secure,
+      })
+    );
+  }
+  if (refreshToken) {
+    cookies.push(
+      formatSetCookieHeader(ADMIN_REFRESH_COOKIE_NAME, refreshToken, {
+        maxAge: refreshMaxAge,
+        path: '/api/v1/auth',
+        httpOnly: true,
+        sameSite: 'Lax',
+        secure,
+      })
+    );
+  }
+  if (csrfToken) {
+    cookies.push(
+      formatSetCookieHeader(ADMIN_CSRF_COOKIE_NAME, csrfToken, {
+        maxAge: refreshMaxAge,
+        path: '/api/v1',
+        httpOnly: true,
+        sameSite: 'Lax',
+        secure,
+      })
+    );
+  }
+  return cookies;
+}
+
+export function clearAdminAuthCookies(request, env) {
+  const secure = isProductionEnv(env) || isHttpsRequest(request);
+  return [
+    formatSetCookieHeader(ADMIN_ACCESS_COOKIE_NAME, '', {
+      maxAge: 0,
+      path: '/api/v1',
+      httpOnly: true,
+      sameSite: 'Lax',
+      secure,
+    }),
+    formatSetCookieHeader(ADMIN_REFRESH_COOKIE_NAME, '', {
+      maxAge: 0,
+      path: '/api/v1/auth',
+      httpOnly: true,
+      sameSite: 'Lax',
+      secure,
+    }),
+    formatSetCookieHeader(ADMIN_CSRF_COOKIE_NAME, '', {
+      maxAge: 0,
+      path: '/api/v1',
+      httpOnly: true,
+      sameSite: 'Lax',
+      secure,
+    }),
+  ];
+}
+
+export function buildClientAuthCookies(
+  request,
+  env,
+  { accessToken, refreshToken, csrfToken, accessMaxAge = 900, refreshMaxAge = 604800 }
+) {
+  const secure = isProductionEnv(env) || isHttpsRequest(request);
+  const cookies = [];
+  if (accessToken) {
+    cookies.push(
+      formatSetCookieHeader(CLIENT_ACCESS_COOKIE_NAME, accessToken, {
+        maxAge: accessMaxAge,
+        path: '/api/v1',
+        httpOnly: true,
+        sameSite: 'Lax',
+        secure,
+      })
+    );
+  }
+  if (refreshToken) {
+    cookies.push(
+      formatSetCookieHeader(CLIENT_REFRESH_COOKIE_NAME, refreshToken, {
+        maxAge: refreshMaxAge,
+        path: '/api/v1/client/auth',
+        httpOnly: true,
+        sameSite: 'Lax',
+        secure,
+      })
+    );
+  }
+  if (csrfToken) {
+    cookies.push(
+      formatSetCookieHeader(CLIENT_CSRF_COOKIE_NAME, csrfToken, {
+        maxAge: refreshMaxAge,
+        path: '/api/v1',
+        httpOnly: true,
+        sameSite: 'Lax',
+        secure,
+      })
+    );
+  }
+  return cookies;
+}
+
+export function clearClientAuthCookies(request, env) {
+  const secure = isProductionEnv(env) || isHttpsRequest(request);
+  return [
+    formatSetCookieHeader(CLIENT_ACCESS_COOKIE_NAME, '', {
+      maxAge: 0,
+      path: '/api/v1',
+      httpOnly: true,
+      sameSite: 'Lax',
+      secure,
+    }),
+    formatSetCookieHeader(CLIENT_REFRESH_COOKIE_NAME, '', {
+      maxAge: 0,
+      path: '/api/v1/client/auth',
+      httpOnly: true,
+      sameSite: 'Lax',
+      secure,
+    }),
+    formatSetCookieHeader(CLIENT_CSRF_COOKIE_NAME, '', {
+      maxAge: 0,
+      path: '/api/v1',
+      httpOnly: true,
+      sameSite: 'Lax',
+      secure,
+    }),
+  ];
+}
+
+export function createCsrfToken() {
+  return generateRandomToken(32);
+}
+
+export async function validateCookieCsrf(request, cookies, csrfCookieName) {
   const method = (request.method || 'GET').toUpperCase();
   if (['GET', 'HEAD', 'OPTIONS'].includes(method)) {
     return true;
   }
   const csrfHeader = request.headers.get('X-CSRF-Token') || '';
-  const csrfCookie = cookies[csrfCookieName] || '';
-  return Boolean(csrfHeader && csrfCookie && csrfHeader === csrfCookie);
+  const csrfCookie = cookies?.[csrfCookieName] || '';
+  return timingSafeEqualStrings(csrfHeader, csrfCookie);
 }
 
 /**
@@ -78,8 +289,8 @@ export async function authenticateAdmin(
 
   if (authHeader.startsWith('Bearer ')) {
     token = authHeader.slice('Bearer '.length).trim();
-  } else if (cookies.dtks_access_token) {
-    token = cookies.dtks_access_token;
+  } else if (cookies[ADMIN_ACCESS_COOKIE_NAME]) {
+    token = cookies[ADMIN_ACCESS_COOKIE_NAME];
     usedCookieAuth = true;
   }
 
@@ -94,7 +305,7 @@ export async function authenticateAdmin(
     };
   }
 
-  if (usedCookieAuth && !validateCookieCsrf(request, cookies, 'dtks_csrf_token')) {
+  if (usedCookieAuth && !(await validateCookieCsrf(request, cookies, ADMIN_CSRF_COOKIE_NAME))) {
     return {
       authenticated: false,
       response: errorResponse(
@@ -239,8 +450,8 @@ export async function authenticateClient(
 
   if (authHeader.startsWith('Bearer ')) {
     token = authHeader.slice('Bearer '.length).trim();
-  } else if (cookies.dtks_client_access_token) {
-    token = cookies.dtks_client_access_token;
+  } else if (cookies[CLIENT_ACCESS_COOKIE_NAME]) {
+    token = cookies[CLIENT_ACCESS_COOKIE_NAME];
     usedCookieAuth = true;
   }
 
@@ -255,7 +466,7 @@ export async function authenticateClient(
     };
   }
 
-  if (usedCookieAuth && !validateCookieCsrf(request, cookies, 'dtks_client_csrf_token')) {
+  if (usedCookieAuth && !(await validateCookieCsrf(request, cookies, CLIENT_CSRF_COOKIE_NAME))) {
     return {
       authenticated: false,
       response: errorResponse(
@@ -394,14 +605,42 @@ export async function authenticateClient(
 
 /**
  * Optional client session resolver for endpoints supporting both guests and logged-in clients
- * (e.g., `POST /api/v1/orders`). Never throws or blocks unauthenticated guests.
+ * (e.g., `POST /api/v1/orders`). Enforces CSRF protection when a client cookie is present
+ * without an Authorization Bearer header, so cross-site cookie-carrying requests fail closed.
  */
-export async function getOptionalAuthenticatedClient(request, env) {
+export async function resolveOptionalClientAuth(request, env) {
   const authHeader = request.headers.get('Authorization') || '';
   const cookies = parseCookies(request.headers.get('Cookie') || '');
-  if (!authHeader.startsWith('Bearer ') && !cookies.dtks_client_access_token) {
-    return null;
+  const hasBearer = authHeader.startsWith('Bearer ');
+  const hasClientCookie = Boolean(cookies[CLIENT_ACCESS_COOKIE_NAME]);
+
+  if (!hasBearer && !hasClientCookie) {
+    return { client: null, errorResponse: null };
   }
+
+  if (!hasBearer && hasClientCookie) {
+    const csrfOk = await validateCookieCsrf(request, cookies, CLIENT_CSRF_COOKIE_NAME);
+    if (!csrfOk) {
+      return {
+        client: null,
+        errorResponse: errorResponse(
+          'CSRF token validation failed for cookie-authenticated request.',
+          403,
+          'CSRF_VALIDATION_FAILED'
+        ),
+      };
+    }
+  }
+
   const result = await authenticateClient(request, env, { requireVerified: true });
-  return result.authenticated ? result.client : null;
+  return {
+    client: result.authenticated ? result.client : null,
+    errorResponse: null,
+  };
 }
+
+export async function getOptionalAuthenticatedClient(request, env) {
+  const { client } = await resolveOptionalClientAuth(request, env);
+  return client;
+}
+

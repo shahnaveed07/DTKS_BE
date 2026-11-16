@@ -552,16 +552,33 @@ export async function acceptAdminInvite(request, env) {
   const passwordHash = await hashPassword(password);
   const now = new Date().toISOString();
 
-  // Atomically claim the single-use invitation first so concurrent requests cannot double-consume
+  // Atomically claim the single-use, unrevoked, unexpired invitation first
   const claimRes = await env.DB.prepare(
     `UPDATE admin_invitations
      SET used_at = ?
-     WHERE id = ? AND used_at IS NULL AND revoked_at IS NULL`
+     WHERE id = ?
+       AND used_at IS NULL
+       AND revoked_at IS NULL
+       AND julianday(expires_at) > julianday(?)`
   )
-    .bind(now, invite.id)
+    .bind(now, invite.id, now)
     .run();
 
   if (Number(claimRes?.meta?.changes || 0) !== 1) {
+    const freshInvite = await env.DB.prepare(
+      'SELECT used_at, revoked_at FROM admin_invitations WHERE id = ?'
+    )
+      .bind(invite.id)
+      .first();
+
+    if (freshInvite && !freshInvite.used_at && !freshInvite.revoked_at) {
+      return errorResponse(
+        'This invitation token has expired. Ask a super administrator to resend an invitation.',
+        400,
+        'INVITE_TOKEN_EXPIRED'
+      );
+    }
+
     return errorResponse(
       'This invitation token has already been used or revoked.',
       400,
@@ -670,7 +687,7 @@ export async function updateAdminAccount(request, env, currentAdmin, id) {
     }
 
     await env.DB.prepare(
-      'UPDATE refresh_sessions SET revoked_at = ? WHERE admin_id = ? AND revoked_at IS NULL'
+      "UPDATE refresh_sessions SET revoked_at = ?, revoke_reason = 'role_changed' WHERE admin_id = ? AND revoked_at IS NULL"
     )
       .bind(now, existing.id)
       .run();
@@ -787,7 +804,7 @@ export async function updateAdminAccountStatus(request, env, currentAdmin, id) {
     }
 
     await env.DB.prepare(
-      'UPDATE refresh_sessions SET revoked_at = ? WHERE admin_id = ? AND revoked_at IS NULL'
+      "UPDATE refresh_sessions SET revoked_at = ?, revoke_reason = 'account_deactivated' WHERE admin_id = ? AND revoked_at IS NULL"
     )
       .bind(now, existing.id)
       .run();
@@ -829,7 +846,7 @@ export async function revokeAdminAccountSessions(request, env, currentAdmin, id)
   const now = new Date().toISOString();
   const [revokeRes] = await env.DB.batch([
     env.DB.prepare(
-      'UPDATE refresh_sessions SET revoked_at = ? WHERE admin_id = ? AND revoked_at IS NULL'
+      "UPDATE refresh_sessions SET revoked_at = ?, revoke_reason = 'admin_sessions_revoked' WHERE admin_id = ? AND revoked_at IS NULL"
     ).bind(now, existing.id),
     env.DB.prepare(
       'UPDATE admins SET token_version = COALESCE(token_version, 1) + 1, updated_at = ? WHERE id = ?'

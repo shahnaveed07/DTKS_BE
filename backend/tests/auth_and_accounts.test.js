@@ -87,7 +87,7 @@ describe('DTKS Admin Account Management & Client Auth Test Suite (/api/v1)', () 
       .reverse()
       .find((m) => Array.isArray(m.to) && m.to.includes(recipientEmail));
     assert.ok(email, `Expected email dispatched to ${recipientEmail}`);
-    const match = /\?token=([a-f0-9]+)/i.exec(email.text || '');
+    const match = /[?#]token=([a-f0-9]+)/i.exec(email.text || '');
     assert.ok(match && match[1], `Expected token link in email text to ${recipientEmail}`);
     return match[1];
   }
@@ -107,6 +107,12 @@ describe('DTKS Admin Account Management & Client Auth Test Suite (/api/v1)', () 
     if (origin) reqHeaders.set('Origin', origin);
     if (ip) reqHeaders.set('CF-Connecting-IP', ip);
     if (token) reqHeaders.set('Authorization', `Bearer ${token}`);
+    if (
+      !reqHeaders.has('X-Auth-Mode') &&
+      (pathname.endsWith('/login') || pathname.endsWith('/refresh'))
+    ) {
+      reqHeaders.set('X-Auth-Mode', 'bearer');
+    }
 
     let requestBody = body;
     if (body && typeof body === 'object' && !Buffer.isBuffer(body)) {
@@ -457,7 +463,8 @@ describe('DTKS Admin Account Management & Client Auth Test Suite (/api/v1)', () 
     });
     assert.equal(guestOrderRes.status, 201);
     const guestOrderId = guestOrderRes.json.data.order.id;
-    const guestOrderRef = guestOrderRes.json.data.order.order_number;
+    const guestTrackingToken = guestOrderRes.json.data.trackingToken;
+    assert.ok(guestTrackingToken && guestTrackingToken.length >= 64);
     assert.equal(guestOrderRes.json.data.order.status, 'Pending');
 
     // Admin adds internal admin_notes and quotation to that order
@@ -474,12 +481,14 @@ describe('DTKS Admin Account Management & Client Auth Test Suite (/api/v1)', () 
     });
     assert.equal(adminQuoteRes.status, 200);
 
-    // Guest tracking still works without auth and never leaks admin_notes
-    const trackRes = await apiRequest(
-      `/api/v1/orders/track?ref=${encodeURIComponent(guestOrderRef)}&email=${encodeURIComponent(guestEmail)}`
-    );
+    // Guest tracking works via private tracking token and never leaks admin_notes or PII
+    const trackRes = await apiRequest('/api/v1/orders/track', {
+      method: 'POST',
+      body: { token: guestTrackingToken },
+    });
     assert.equal(trackRes.status, 200);
     assert.equal(trackRes.json.data.order.admin_notes, undefined);
+    assert.equal(trackRes.json.data.order.customer_email, undefined);
 
     // 2. Client registration validation: invalid email, weak password, mismatched confirmPassword
     const invalidEmailReg = await apiRequest('/api/v1/client/auth/register', {
@@ -708,15 +717,23 @@ describe('DTKS Admin Account Management & Client Auth Test Suite (/api/v1)', () 
     assert.equal(refreshRes.status, 200);
     assert.notEqual(refreshRes.json.data.refreshToken, clientARefresh);
 
-    // Reusing old refresh token rejected
+    // Reusing old rotated refresh token triggers replay detection -> revokes all sessions
     const reuseRefresh = await apiRequest('/api/v1/client/auth/refresh', {
       method: 'POST',
       body: { refreshToken: clientARefresh },
     });
     assert.equal(reuseRefresh.status, 401);
+    assert.equal(reuseRefresh.json.error.code, 'REFRESH_TOKEN_REPLAY_DETECTED');
 
-    clientAToken = refreshRes.json.data.accessToken;
-    clientARefresh = refreshRes.json.data.refreshToken;
+    // Re-login Client A after replay cascade revocation before subsequent tests
+    const reloginA = await apiRequest('/api/v1/client/auth/login', {
+      method: 'POST',
+      ip: '10.2.1.9',
+      body: { email: 'clienta@dtks-test.studio', password: 'ClientA#2026!Strong' },
+    });
+    assert.equal(reloginA.status, 200);
+    clientAToken = reloginA.json.data.accessToken;
+    clientARefresh = reloginA.json.data.refreshToken;
   });
 
   it('D1. Client-Only Data Access, Cross-Token Isolation & IDOR Protection', async () => {
@@ -1224,7 +1241,9 @@ describe('DTKS Admin Account Management & Client Auth Test Suite (/api/v1)', () 
     assert.equal(dbRow.privacy_version, '2026-02');
     assert.equal(dbRow.legal_accepted_ip, '10.4.0.3');
 
-    // Resend verification failure returns 503 EMAIL_DELIVERY_FAILED instead of misleading 200 OK
+    // Resend verification failure returns uniform 200 OK (anti-enumeration), revokes ONLY failed token,
+    // keeps prior unused verification token valid, and logs an internal audit event
+    const oldTokenC = extractTokenFromLatestEmail('clientc@dtks-test.studio');
     emailShouldFail = true;
     const resendFail = await apiRequest('/api/v1/client/auth/resend-verification', {
       method: 'POST',
@@ -1232,12 +1251,10 @@ describe('DTKS Admin Account Management & Client Auth Test Suite (/api/v1)', () 
       body: { email: 'clientc@dtks-test.studio' },
     });
     emailShouldFail = false;
-    assert.equal(resendFail.status, 503);
-    assert.equal(resendFail.json.error.code, 'EMAIL_DELIVERY_FAILED');
-    assert.equal(resendFail.json.error.details.verificationEmailSent, false);
+    assert.equal(resendFail.status, 200);
+    assert.deepEqual(resendFail.json.data, { requested: true });
 
     // Resend verification recovery succeeds and revokes older token
-    const oldTokenC = extractTokenFromLatestEmail('clientc@dtks-test.studio');
     const resendOk = await apiRequest('/api/v1/client/auth/resend-verification', {
       method: 'POST',
       ip: '10.4.0.5',
@@ -1259,7 +1276,7 @@ describe('DTKS Admin Account Management & Client Auth Test Suite (/api/v1)', () 
     });
     assert.equal(verifyOk.status, 200);
 
-    // Forgot password failure for verified client returns 503 EMAIL_DELIVERY_FAILED
+    // Forgot password failure for verified client returns uniform 200 OK (anti-enumeration)
     emailShouldFail = true;
     const forgotFail = await apiRequest('/api/v1/client/auth/forgot-password', {
       method: 'POST',
@@ -1267,8 +1284,8 @@ describe('DTKS Admin Account Management & Client Auth Test Suite (/api/v1)', () 
       body: { email: 'clientc@dtks-test.studio' },
     });
     emailShouldFail = false;
-    assert.equal(forgotFail.status, 503);
-    assert.equal(forgotFail.json.error.code, 'EMAIL_DELIVERY_FAILED');
+    assert.equal(forgotFail.status, 200);
+    assert.deepEqual(forgotFail.json.data, { requested: true });
   });
 
   it('C3. Client Reset Password (newPassword/Concurrency), Change Password Invalidation & Single vs All-Devices Logout', async () => {

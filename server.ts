@@ -70,9 +70,18 @@ async function startServer() {
       const workerResponse = await workerApp.fetch(webRequest, workerEnv, {});
 
       res.status(workerResponse.status);
+      const setCookies =
+        typeof workerResponse.headers.getSetCookie === 'function'
+          ? workerResponse.headers.getSetCookie()
+          : [];
       workerResponse.headers.forEach((val, key) => {
-        res.setHeader(key, val);
+        if (key.toLowerCase() !== 'set-cookie') {
+          res.setHeader(key, val);
+        }
       });
+      if (setCookies.length > 0) {
+        res.setHeader('Set-Cookie', setCookies);
+      }
 
       const arrayBuffer = await workerResponse.arrayBuffer();
       res.send(Buffer.from(arrayBuffer));

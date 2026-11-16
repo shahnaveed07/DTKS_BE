@@ -35,6 +35,7 @@ ADMIN_PASSWORD_RESET_TOKEN_MAX = "8"
 #   - INITIAL_ADMIN_EMAIL     (Required on first bootstrap: administrator email)
 #   - INITIAL_ADMIN_PASSWORD  (Required on first bootstrap: strong password >= 12 chars)
 #   - RESEND_API_KEY          (Required for client verification, password resets, and admin invites)
+#   - RATE_LIMIT_HMAC_SECRET  (Optional dedicated key for HMAC rate-limit bucket hashing; falls back to JWT_SECRET)
 # ==============================================================================
 
 # Cloudflare D1 Relational Database Binding (`dtks-production-db`)

@@ -6,6 +6,7 @@ import {
   safeJsonParse,
   sanitizeText,
 } from '../utils/response.js';
+import { isSafeUrl } from '../validators/schemas.js';
 import { logAdminActivity } from '../services/auditService.js';
 import { authenticateAdmin } from '../middleware/authMiddleware.js';
 import { mapServiceRow } from './servicesController.js';
@@ -161,7 +162,23 @@ function normalizeTeamMemberOutput(member) {
 }
 
 export async function listTeamMembers(request, env) {
-  const team = (await readSettingArray(env, 'team_members')).map(normalizeTeamMemberOutput);
+  const url = new URL(request.url);
+  const wantsAll =
+    url.searchParams.get('includeInactive') === 'true' ||
+    url.searchParams.get('all') === 'true';
+
+  let showAll = false;
+  if (wantsAll) {
+    const auth = await authenticateAdmin(request, env);
+    if (auth.authenticated) {
+      showAll = true;
+    }
+  }
+
+  let team = (await readSettingArray(env, 'team_members')).map(normalizeTeamMemberOutput);
+  if (!showAll) {
+    team = team.filter((m) => m && m.visible !== false);
+  }
   team.sort((a, b) => Number(a.sortOrder || 1) - Number(b.sortOrder || 1));
   return successResponse({ team }, 'Team members fetched.');
 }
@@ -171,6 +188,27 @@ export async function createTeamMember(request, env, admin) {
   const fullName = sanitizeText(body.fullName ?? body.full_name, 160);
   if (!fullName || fullName.length < 2) {
     return errorResponse('Team member full name is required.', 400, 'VALIDATION_ERROR');
+  }
+
+  const avatarUrl = sanitizeText(body.avatarUrl || '', 2000);
+  const linkedinUrl = sanitizeText(body.linkedinUrl || '', 500);
+  const githubUrl = sanitizeText(body.githubUrl || '', 500);
+  const websiteUrl = sanitizeText(body.websiteUrl || '', 500);
+  const urlErrors = {};
+  if (avatarUrl && !isSafeUrl(avatarUrl, { allowRelative: true, allowDataImage: true })) {
+    urlErrors.avatarUrl = 'Avatar URL must be a valid HTTP(S) URL or internal asset path.';
+  }
+  if (linkedinUrl && !isSafeUrl(linkedinUrl, { allowRelative: false })) {
+    urlErrors.linkedinUrl = 'LinkedIn URL must use HTTP or HTTPS.';
+  }
+  if (githubUrl && !isSafeUrl(githubUrl, { allowRelative: false })) {
+    urlErrors.githubUrl = 'GitHub URL must use HTTP or HTTPS.';
+  }
+  if (websiteUrl && !isSafeUrl(websiteUrl, { allowRelative: false })) {
+    urlErrors.websiteUrl = 'Website URL must use HTTP or HTTPS.';
+  }
+  if (Object.keys(urlErrors).length > 0) {
+    return errorResponse('Team member URL validation failed.', 400, 'VALIDATION_ERROR', urlErrors);
   }
 
   const team = await readSettingArray(env, 'team_members');
@@ -198,11 +236,11 @@ export async function createTeamMember(request, env, admin) {
     technologies: Array.isArray(body.technologies)
       ? body.technologies.map((t) => sanitizeText(String(t || ''), 120)).filter(Boolean)
       : [],
-    avatarUrl: sanitizeText(body.avatarUrl || '', 2000),
+    avatarUrl,
     initials,
-    linkedinUrl: sanitizeText(body.linkedinUrl || '', 500),
-    githubUrl: sanitizeText(body.githubUrl || '', 500),
-    websiteUrl: sanitizeText(body.websiteUrl || '', 500),
+    linkedinUrl,
+    githubUrl,
+    websiteUrl,
     visible: body.visible !== false,
     isPlaceholder: Boolean(body.isPlaceholder),
     sortOrder,
@@ -250,6 +288,32 @@ export async function updateTeamMember(request, env, admin, id) {
       ? Number(rawSort)
       : Number(existing.sortOrder ?? existing.order ?? idx + 1);
 
+  const nextAvatarUrl =
+    body.avatarUrl !== undefined ? sanitizeText(body.avatarUrl, 2000) : existing.avatarUrl || '';
+  const nextLinkedinUrl =
+    body.linkedinUrl !== undefined ? sanitizeText(body.linkedinUrl, 500) : existing.linkedinUrl || '';
+  const nextGithubUrl =
+    body.githubUrl !== undefined ? sanitizeText(body.githubUrl, 500) : existing.githubUrl || '';
+  const nextWebsiteUrl =
+    body.websiteUrl !== undefined ? sanitizeText(body.websiteUrl, 500) : existing.websiteUrl || '';
+
+  const urlErrors = {};
+  if (nextAvatarUrl && !isSafeUrl(nextAvatarUrl, { allowRelative: true, allowDataImage: true })) {
+    urlErrors.avatarUrl = 'Avatar URL must be a valid HTTP(S) URL or internal asset path.';
+  }
+  if (nextLinkedinUrl && !isSafeUrl(nextLinkedinUrl, { allowRelative: false })) {
+    urlErrors.linkedinUrl = 'LinkedIn URL must use HTTP or HTTPS.';
+  }
+  if (nextGithubUrl && !isSafeUrl(nextGithubUrl, { allowRelative: false })) {
+    urlErrors.githubUrl = 'GitHub URL must use HTTP or HTTPS.';
+  }
+  if (nextWebsiteUrl && !isSafeUrl(nextWebsiteUrl, { allowRelative: false })) {
+    urlErrors.websiteUrl = 'Website URL must use HTTP or HTTPS.';
+  }
+  if (Object.keys(urlErrors).length > 0) {
+    return errorResponse('Team member URL validation failed.', 400, 'VALIDATION_ERROR', urlErrors);
+  }
+
   const now = new Date().toISOString();
   const updated = {
     id,
@@ -267,18 +331,12 @@ export async function updateTeamMember(request, env, admin, id) {
       : Array.isArray(existing.technologies)
       ? existing.technologies
       : [],
-    avatarUrl:
-      body.avatarUrl !== undefined ? sanitizeText(body.avatarUrl, 2000) : existing.avatarUrl || '',
+    avatarUrl: nextAvatarUrl,
     initials:
       body.initials !== undefined ? sanitizeText(body.initials, 6) : existing.initials || '',
-    linkedinUrl:
-      body.linkedinUrl !== undefined
-        ? sanitizeText(body.linkedinUrl, 500)
-        : existing.linkedinUrl || '',
-    githubUrl:
-      body.githubUrl !== undefined ? sanitizeText(body.githubUrl, 500) : existing.githubUrl || '',
-    websiteUrl:
-      body.websiteUrl !== undefined ? sanitizeText(body.websiteUrl, 500) : existing.websiteUrl || '',
+    linkedinUrl: nextLinkedinUrl,
+    githubUrl: nextGithubUrl,
+    websiteUrl: nextWebsiteUrl,
     visible: body.visible !== undefined ? Boolean(body.visible) : existing.visible !== false,
     isPlaceholder:
       body.isPlaceholder !== undefined ? Boolean(body.isPlaceholder) : Boolean(existing.isPlaceholder),
@@ -352,7 +410,23 @@ export async function reorderTeamMember(request, env, admin, id) {
 }
 
 export async function listTestimonials(request, env) {
-  const testimonials = await readSettingArray(env, 'testimonials');
+  const url = new URL(request.url);
+  const wantsAll =
+    url.searchParams.get('includeInactive') === 'true' ||
+    url.searchParams.get('all') === 'true';
+
+  let showAll = false;
+  if (wantsAll) {
+    const auth = await authenticateAdmin(request, env);
+    if (auth.authenticated) {
+      showAll = true;
+    }
+  }
+
+  let testimonials = await readSettingArray(env, 'testimonials');
+  if (!showAll) {
+    testimonials = testimonials.filter((t) => t && t.isApproved !== false);
+  }
   return successResponse({ testimonials }, 'Testimonials fetched.');
 }
 
@@ -451,15 +525,20 @@ export async function getPublicBootstrap(request, env) {
     settingsMap[r.setting_key] = safeJsonParse(r.setting_value, {});
   }
 
+  const rawTeam = Array.isArray(settingsMap.team_members)
+    ? settingsMap.team_members.map(normalizeTeamMemberOutput)
+    : [];
+  const rawTestimonials = Array.isArray(settingsMap.testimonials) ? settingsMap.testimonials : [];
+
   return successResponse(
     {
       services: (servicesRes.results || []).map(mapServiceRow),
       packages: (packagesRes.results || []).map(mapPackageRow),
       portfolio: (portfolioRes.results || []).map(mapPortfolioRow),
-      team: Array.isArray(settingsMap.team_members)
-        ? settingsMap.team_members.map(normalizeTeamMemberOutput)
-        : [],
-      testimonials: Array.isArray(settingsMap.testimonials) ? settingsMap.testimonials : [],
+      team: showAll ? rawTeam : rawTeam.filter((m) => m && m.visible !== false),
+      testimonials: showAll
+        ? rawTestimonials
+        : rawTestimonials.filter((t) => t && t.isApproved !== false),
       settings: stripSensitiveSettings(settingsMap.general || {}),
       addons: Array.isArray(settingsMap.addons) ? settingsMap.addons : [],
       maintenancePlans: Array.isArray(settingsMap.maintenance_plans)

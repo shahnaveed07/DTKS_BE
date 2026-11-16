@@ -95,6 +95,12 @@ describe('DTKS API Contract Parity & Production Security Hardening Suite', () =>
     if (origin !== null) reqHeaders.set('Origin', origin);
     if (ip !== null) reqHeaders.set('CF-Connecting-IP', ip);
     if (token) reqHeaders.set('Authorization', `Bearer ${token}`);
+    if (
+      !reqHeaders.has('X-Auth-Mode') &&
+      (pathname.endsWith('/login') || pathname.endsWith('/refresh'))
+    ) {
+      reqHeaders.set('X-Auth-Mode', 'bearer');
+    }
 
     let requestBody = body;
     if (body && !(body instanceof FormData) && typeof body === 'object' && !Buffer.isBuffer(body)) {
@@ -464,6 +470,7 @@ describe('DTKS API Contract Parity & Production Security Hardening Suite', () =>
       ['GET', '/bootstrap'],
       ['GET', '/uploads/{key}'],
       ['GET', '/assets/{key}'],
+      ['GET', '/auth/csrf'],
       ['POST', '/auth/login'],
       ['POST', '/auth/refresh'],
       ['POST', '/auth/accept-invite'],
@@ -483,6 +490,7 @@ describe('DTKS API Contract Parity & Production Security Hardening Suite', () =>
       ['GET', '/admin/accounts/{id}'],
       ['PATCH', '/admin/accounts/{id}'],
       ['PUT', '/admin/accounts/{id}'],
+      ['GET', '/client/auth/csrf'],
       ['POST', '/client/auth/register'],
       ['POST', '/client/auth/resend-verification'],
       ['POST', '/client/auth/verify-email'],
@@ -526,7 +534,7 @@ describe('DTKS API Contract Parity & Production Security Hardening Suite', () =>
       ['PUT', '/portfolio/{slugOrId}'],
       ['PATCH', '/portfolio/{slugOrId}'],
       ['DELETE', '/portfolio/{slugOrId}'],
-      ['GET', '/orders/track'],
+      ['POST', '/orders/track'],
       ['POST', '/orders'],
       ['GET', '/orders'],
       ['PATCH', '/orders/{id}/status'],

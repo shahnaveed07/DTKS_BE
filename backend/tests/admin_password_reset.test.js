@@ -186,6 +186,12 @@ describe('DTKS Admin Forgot Password & Reset Password Suite (/api/v1/auth/*)', (
     if (origin !== null) reqHeaders.set('Origin', origin);
     if (ip !== null) reqHeaders.set('CF-Connecting-IP', ip);
     if (token) reqHeaders.set('Authorization', `Bearer ${token}`);
+    if (
+      !reqHeaders.has('X-Auth-Mode') &&
+      (pathname.endsWith('/login') || pathname.endsWith('/refresh'))
+    ) {
+      reqHeaders.set('X-Auth-Mode', 'bearer');
+    }
 
     let requestBody = body;
     if (body && typeof body === 'object' && !Buffer.isBuffer(body)) {
@@ -219,9 +225,9 @@ describe('DTKS Admin Forgot Password & Reset Password Suite (/api/v1/auth/*)', (
     if (adminFragmentMatch?.[1]) {
       return adminFragmentMatch[1];
     }
-    const clientQueryMatch = /\?token=([a-f0-9]+)/i.exec(emailPayload.text || '');
-    assert.ok(clientQueryMatch && clientQueryMatch[1], 'Expected raw token inside email reset link');
-    return clientQueryMatch[1];
+    const clientTokenMatch = /[?#]token=([a-f0-9]+)/i.exec(emailPayload.text || '');
+    assert.ok(clientTokenMatch && clientTokenMatch[1], 'Expected raw token inside email reset link');
+    return clientTokenMatch[1];
   }
 
   it('0. Migration & Schema Readiness: admin_auth_tokens exists and GET /api/v1/ready succeeds', async () => {

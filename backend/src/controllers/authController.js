@@ -8,7 +8,10 @@ import {
   sha256Hex,
 } from '../utils/crypto.js';
 import {
+  ADMIN_ACCESS_COOKIE_NAME,
+  ADMIN_CSRF_COOKIE_NAME,
   ADMIN_PASSWORD_RESET_EXPIRY_SECONDS,
+  ADMIN_REFRESH_COOKIE_NAME,
   PENDING_INVITE_PASSWORD_SENTINEL,
 } from '../config/constants.js';
 import { successResponse, errorResponse, parseJsonBody } from '../utils/response.js';
@@ -18,7 +21,19 @@ import {
   validateForgotPasswordInput,
   validateResetPasswordInput,
 } from '../validators/schemas.js';
-import { getJwtSecret } from '../middleware/authMiddleware.js';
+import {
+  appendCookiesToResponse,
+  buildAdminAuthCookies,
+  clearAdminAuthCookies,
+  createCsrfToken,
+  formatSetCookieHeader,
+  getJwtSecret,
+  isBearerModeRequested,
+  isHttpsRequest,
+  parseCookies,
+  validateCookieCsrf,
+} from '../middleware/authMiddleware.js';
+import { isProductionEnv } from '../config/cors.js';
 import { getClientIp } from '../middleware/rateLimiter.js';
 import { logAdminActivity } from '../services/auditService.js';
 import {
@@ -75,6 +90,31 @@ function mapAdminResponse(row, lastLoginOverride = null) {
     last_login_at: lastLogin,
     lastLoginAt: lastLogin,
   };
+}
+
+export async function getAdminCsrfToken(request, env) {
+  const cookies = parseCookies(request.headers.get('Cookie') || '');
+  const existing = cookies[ADMIN_CSRF_COOKIE_NAME];
+  const csrfToken =
+    typeof existing === 'string' && existing.length >= 32 ? existing : createCsrfToken();
+  const refreshExp = getRefreshExpiresSeconds(env);
+  const secure = isProductionEnv(env) || isHttpsRequest(request);
+  const res = successResponse(
+    {
+      csrfToken,
+      csrf_token: csrfToken,
+    },
+    'CSRF token issued.'
+  );
+  return appendCookiesToResponse(res, [
+    formatSetCookieHeader(ADMIN_CSRF_COOKIE_NAME, csrfToken, {
+      maxAge: refreshExp,
+      path: '/api/v1',
+      httpOnly: true,
+      sameSite: 'Lax',
+      secure,
+    }),
+  ]);
 }
 
 export async function loginAdmin(request, env) {
@@ -197,14 +237,30 @@ export async function loginAdmin(request, env) {
     request,
   });
 
-  const csrfToken = generateRandomToken(16);
+  const csrfToken = createCsrfToken();
+  const bearerMode = isBearerModeRequested(request);
 
-  return successResponse(
+  if (bearerMode) {
+    return successResponse(
+      {
+        authMode: 'bearer',
+        accessToken,
+        access_token: accessToken,
+        refreshToken: rawRefreshToken,
+        refresh_token: rawRefreshToken,
+        csrfToken,
+        csrf_token: csrfToken,
+        expiresIn: accessExp,
+        expires_in: accessExp,
+        admin: mapAdminResponse(admin, now),
+      },
+      'Authenticated successfully.'
+    );
+  }
+
+  const res = successResponse(
     {
-      accessToken,
-      access_token: accessToken,
-      refreshToken: rawRefreshToken,
-      refresh_token: rawRefreshToken,
+      authMode: 'cookie',
       csrfToken,
       csrf_token: csrfToken,
       expiresIn: accessExp,
@@ -213,9 +269,38 @@ export async function loginAdmin(request, env) {
     },
     'Authenticated successfully.'
   );
+
+  return appendCookiesToResponse(
+    res,
+    buildAdminAuthCookies(request, env, {
+      accessToken,
+      refreshToken: rawRefreshToken,
+      csrfToken,
+      accessMaxAge: accessExp,
+      refreshMaxAge: refreshExp,
+    })
+  );
 }
 
 export async function logoutAdmin(request, env, currentAdmin) {
+  const cookies = parseCookies(request.headers.get('Cookie') || '');
+  const authHeader = request.headers.get('Authorization') || '';
+  const hasBearer = authHeader.startsWith('Bearer ');
+  const hasAdminCookie = Boolean(
+    cookies[ADMIN_ACCESS_COOKIE_NAME] || cookies[ADMIN_REFRESH_COOKIE_NAME]
+  );
+
+  if (!hasBearer && hasAdminCookie) {
+    const csrfOk = await validateCookieCsrf(request, cookies, ADMIN_CSRF_COOKIE_NAME);
+    if (!csrfOk) {
+      return errorResponse(
+        'CSRF token validation failed for cookie-authenticated request.',
+        403,
+        'CSRF_VALIDATION_FAILED'
+      );
+    }
+  }
+
   const body = await parseJsonBody(request);
   const rawAllDevices =
     body.allDevices !== undefined ? body.allDevices : body.all_devices;
@@ -227,10 +312,11 @@ export async function logoutAdmin(request, env, currentAdmin) {
   }
 
   const allDevices = rawAllDevices === true;
-  const rawToken =
+  const rawBodyToken =
     typeof (body.refreshToken || body.refresh_token) === 'string'
       ? (body.refreshToken || body.refresh_token).trim()
       : '';
+  const rawToken = rawBodyToken || String(cookies[ADMIN_REFRESH_COOKIE_NAME] || '').trim();
 
   if (allDevices && !currentAdmin?.id) {
     return errorResponse(
@@ -256,7 +342,7 @@ export async function logoutAdmin(request, env, currentAdmin) {
     scope = 'all_devices';
     const [revokeRes] = await env.DB.batch([
       env.DB.prepare(
-        'UPDATE refresh_sessions SET revoked_at = ? WHERE admin_id = ? AND revoked_at IS NULL'
+        "UPDATE refresh_sessions SET revoked_at = ?, revoke_reason = 'logout_all' WHERE admin_id = ? AND revoked_at IS NULL"
       ).bind(now, currentAdmin.id),
       env.DB.prepare(
         'UPDATE admins SET token_version = COALESCE(token_version, 1) + 1, updated_at = ? WHERE id = ?'
@@ -267,12 +353,12 @@ export async function logoutAdmin(request, env, currentAdmin) {
     const hash = await sha256Hex(rawToken);
     const revokeRes = currentAdmin?.id
       ? await env.DB.prepare(
-          'UPDATE refresh_sessions SET revoked_at = ? WHERE refresh_token_hash = ? AND admin_id = ? AND revoked_at IS NULL'
+          "UPDATE refresh_sessions SET revoked_at = ?, revoke_reason = 'logout' WHERE refresh_token_hash = ? AND admin_id = ? AND revoked_at IS NULL"
         )
           .bind(now, hash, currentAdmin.id)
           .run()
       : await env.DB.prepare(
-          'UPDATE refresh_sessions SET revoked_at = ? WHERE refresh_token_hash = ? AND revoked_at IS NULL'
+          "UPDATE refresh_sessions SET revoked_at = ?, revoke_reason = 'logout' WHERE refresh_token_hash = ? AND revoked_at IS NULL"
         )
           .bind(now, hash)
           .run();
@@ -293,7 +379,7 @@ export async function logoutAdmin(request, env, currentAdmin) {
     });
   }
 
-  return successResponse(
+  const res = successResponse(
     {
       loggedOut: true,
       allDevices: scope === 'all_devices',
@@ -304,26 +390,74 @@ export async function logoutAdmin(request, env, currentAdmin) {
       ? 'Logged out from all devices successfully.'
       : 'Logged out successfully.'
   );
+
+  return appendCookiesToResponse(res, clearAdminAuthCookies(request, env));
 }
 
 export async function refreshAdminToken(request, env) {
+  const cookies = parseCookies(request.headers.get('Cookie') || '');
   const body = await parseJsonBody(request);
-  const rawToken =
+  const rawBodyToken =
     typeof (body.refreshToken || body.refresh_token) === 'string'
       ? (body.refreshToken || body.refresh_token).trim()
       : '';
+  const cookieToken = String(cookies[ADMIN_REFRESH_COOKIE_NAME] || '').trim();
+  const usedCookieRefresh = !rawBodyToken && Boolean(cookieToken);
+
+  if (usedCookieRefresh) {
+    const csrfOk = await validateCookieCsrf(request, cookies, ADMIN_CSRF_COOKIE_NAME);
+    if (!csrfOk) {
+      return errorResponse(
+        'CSRF token validation failed for cookie-authenticated request.',
+        403,
+        'CSRF_VALIDATION_FAILED'
+      );
+    }
+  }
+
+  const rawToken = rawBodyToken || cookieToken;
   if (!rawToken) {
     return errorResponse('Refresh token is required.', 400, 'MISSING_REFRESH_TOKEN');
   }
 
   const tokenHash = await sha256Hex(rawToken);
   const session = await env.DB.prepare(
-    'SELECT id, admin_id, expires_at, revoked_at FROM refresh_sessions WHERE refresh_token_hash = ?'
+    'SELECT id, admin_id, expires_at, revoked_at, revoke_reason FROM refresh_sessions WHERE refresh_token_hash = ?'
   )
     .bind(tokenHash)
     .first();
 
-  if (!session || session.revoked_at) {
+  if (!session) {
+    return errorResponse('Invalid or revoked refresh token.', 401, 'INVALID_REFRESH_TOKEN');
+  }
+
+  if (session.revoked_at) {
+    if (session.revoke_reason === 'rotated') {
+      const replayNow = new Date().toISOString();
+      await env.DB.batch([
+        env.DB.prepare(
+          "UPDATE refresh_sessions SET revoked_at = ?, revoke_reason = 'replay_detected' WHERE admin_id = ? AND revoked_at IS NULL"
+        ).bind(replayNow, session.admin_id),
+        env.DB.prepare(
+          'UPDATE admins SET token_version = COALESCE(token_version, 1) + 1, updated_at = ? WHERE id = ?'
+        ).bind(replayNow, session.admin_id),
+      ]);
+      await logAdminActivity(env, {
+        adminId: session.admin_id,
+        action: 'ADMIN_REFRESH_REPLAY_DETECTED',
+        entityType: 'Admin',
+        entityId: session.admin_id,
+        details: 'Detected reuse of rotated administrator refresh token; revoked all active sessions.',
+        request,
+      });
+      const replayRes = errorResponse(
+        'Refresh token reuse detected. All administrator sessions have been revoked for security.',
+        401,
+        'REFRESH_TOKEN_REPLAY_DETECTED'
+      );
+      return appendCookiesToResponse(replayRes, clearAdminAuthCookies(request, env));
+    }
+
     return errorResponse('Invalid or revoked refresh token.', 401, 'INVALID_REFRESH_TOKEN');
   }
 
@@ -350,16 +484,29 @@ export async function refreshAdminToken(request, env) {
     return errorResponse('Administrator account is not active.', 403, 'ACCOUNT_DEACTIVATED');
   }
 
-  // Rotate refresh token atomically: claim old session so concurrent replays fail
+  // Rotate refresh token atomically: mark as 'rotated' so replay triggers cascade revocation
   const now = new Date().toISOString();
   const claimSession = await env.DB.prepare(
-    'UPDATE refresh_sessions SET revoked_at = ? WHERE id = ? AND revoked_at IS NULL'
+    "UPDATE refresh_sessions SET revoked_at = ?, revoke_reason = 'rotated' WHERE id = ? AND revoked_at IS NULL"
   )
     .bind(now, session.id)
     .run();
 
   if (Number(claimSession?.meta?.changes || 0) !== 1) {
-    return errorResponse('Invalid or revoked refresh token.', 401, 'INVALID_REFRESH_TOKEN');
+    await env.DB.batch([
+      env.DB.prepare(
+        "UPDATE refresh_sessions SET revoked_at = ?, revoke_reason = 'replay_detected' WHERE admin_id = ? AND revoked_at IS NULL"
+      ).bind(now, session.admin_id),
+      env.DB.prepare(
+        'UPDATE admins SET token_version = COALESCE(token_version, 1) + 1, updated_at = ? WHERE id = ?'
+      ).bind(now, session.admin_id),
+    ]);
+    const replayRes = errorResponse(
+      'Refresh token reuse detected. All administrator sessions have been revoked for security.',
+      401,
+      'REFRESH_TOKEN_REPLAY_DETECTED'
+    );
+    return appendCookiesToResponse(replayRes, clearAdminAuthCookies(request, env));
   }
 
   const accessExp = getAccessExpiresSeconds(env);
@@ -399,14 +546,30 @@ export async function refreshAdminToken(request, env) {
     )
     .run();
 
-  const csrfToken = generateRandomToken(16);
+  const csrfToken = createCsrfToken();
+  const bearerMode = isBearerModeRequested(request);
 
-  return successResponse(
+  if (bearerMode) {
+    return successResponse(
+      {
+        authMode: 'bearer',
+        accessToken: newAccessToken,
+        access_token: newAccessToken,
+        refreshToken: newRawRefreshToken,
+        refresh_token: newRawRefreshToken,
+        csrfToken,
+        csrf_token: csrfToken,
+        expiresIn: accessExp,
+        expires_in: accessExp,
+        admin: mapAdminResponse(admin),
+      },
+      'Session token refreshed.'
+    );
+  }
+
+  const res = successResponse(
     {
-      accessToken: newAccessToken,
-      access_token: newAccessToken,
-      refreshToken: newRawRefreshToken,
-      refresh_token: newRawRefreshToken,
+      authMode: 'cookie',
       csrfToken,
       csrf_token: csrfToken,
       expiresIn: accessExp,
@@ -414,6 +577,17 @@ export async function refreshAdminToken(request, env) {
       admin: mapAdminResponse(admin),
     },
     'Session token refreshed.'
+  );
+
+  return appendCookiesToResponse(
+    res,
+    buildAdminAuthCookies(request, env, {
+      accessToken: newAccessToken,
+      refreshToken: newRawRefreshToken,
+      csrfToken,
+      accessMaxAge: accessExp,
+      refreshMaxAge: refreshExp,
+    })
   );
 }
 
@@ -454,7 +628,7 @@ export async function changeAdminPassword(request, env, admin) {
       'UPDATE admins SET password_hash = ?, token_version = COALESCE(token_version, 1) + 1, updated_at = ? WHERE id = ?'
     ).bind(newHash, now, admin.id),
     env.DB.prepare(
-      'UPDATE refresh_sessions SET revoked_at = ? WHERE admin_id = ? AND revoked_at IS NULL'
+      "UPDATE refresh_sessions SET revoked_at = ?, revoke_reason = 'password_changed' WHERE admin_id = ? AND revoked_at IS NULL"
     ).bind(now, admin.id),
   ]);
 
@@ -467,7 +641,10 @@ export async function changeAdminPassword(request, env, admin) {
     request,
   });
 
-  return successResponse({ updated: true }, 'Password changed successfully.');
+  return appendCookiesToResponse(
+    successResponse({ updated: true }, 'Password changed successfully.'),
+    clearAdminAuthCookies(request, env)
+  );
 }
 
 export async function updateAdminProfile(request, env, admin) {
@@ -768,7 +945,7 @@ export async function resetAdminPassword(request, env) {
          WHERE id = ?`
       ).bind(newHash, now, admin.id),
       env.DB.prepare(
-        'UPDATE refresh_sessions SET revoked_at = ? WHERE admin_id = ? AND revoked_at IS NULL'
+        "UPDATE refresh_sessions SET revoked_at = ?, revoke_reason = 'password_reset' WHERE admin_id = ? AND revoked_at IS NULL"
       ).bind(now, admin.id),
     ]);
   } catch (err) {

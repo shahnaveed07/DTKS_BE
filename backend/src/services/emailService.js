@@ -125,10 +125,13 @@ export async function dispatchEmail(
   };
 }
 
-export async function notifyOrderCreated(env, order) {
+export async function notifyOrderCreated(env, order, { trackingToken = null } = {}) {
   const adminEmail = env?.ADMIN_NOTIFICATION_EMAIL || 'contact@dreamtechkashmirsolutions.studio';
   const orderNumber = order.orderNumber || order.order_number || order.referenceId;
   const appUrl = getAppBaseUrl(env);
+  const trackingLine = trackingToken
+    ? `Track your project status securely anytime using your private tracking link:\n${appUrl}/track-order#token=${encodeURIComponent(trackingToken)}`
+    : `You can track your project status anytime from your DTKS Client Portal at ${appUrl}/client/orders.`;
 
   await dispatchEmail(env, {
     recipientEmail: order.customerEmail || order.customer_email,
@@ -143,7 +146,9 @@ export async function notifyOrderCreated(env, order) {
       `Selected Package: ${order.packageTitle || 'Custom Website Quote'}`,
       `Current Status: ${order.status}`,
       '',
-      `You can track your project status anytime at ${appUrl}/track-order using your Order Number (${orderNumber}) and email address.`,
+      trackingLine,
+      '',
+      `Keep your private tracking link safe and do not share it publicly.`,
       '',
       `Best regards,`,
       `DreamTech Kashmir Solutions (DTKS)`,
@@ -170,11 +175,14 @@ export async function notifyOrderCreated(env, order) {
   });
 }
 
-export async function notifyOrderStatusUpdated(env, order, previousStatus) {
+export async function notifyOrderStatusUpdated(env, order, previousStatus, { trackingToken = null } = {}) {
   const customerEmail = order?.customerEmail || order?.customer_email;
   const orderNumber = order?.orderNumber || order?.order_number || order?.referenceId;
   if (!customerEmail || order.status === previousStatus) return;
   const appUrl = getAppBaseUrl(env);
+  const trackingLine = trackingToken
+    ? `Track full details at ${appUrl}/track-order#token=${encodeURIComponent(trackingToken)}`
+    : `View full details in your DTKS Client Portal at ${appUrl}/client/orders or via your private order tracking link.`;
 
   await dispatchEmail(env, {
     recipientEmail: customerEmail,
@@ -189,7 +197,7 @@ export async function notifyOrderStatusUpdated(env, order, previousStatus) {
       ...(order.quotationAmount ? [`Quotation Amount: INR ${order.quotationAmount}`] : []),
       ...(order.customerUpdate ? [`Team Update: ${order.customerUpdate}`] : []),
       '',
-      `Track full details at ${appUrl}/track-order`,
+      trackingLine,
       '',
       `DreamTech Kashmir Solutions (DTKS)`,
     ].join('\n'),
@@ -224,7 +232,7 @@ export async function sendClientVerificationEmail(
   { accountId, email, fullName, verificationToken, expiresHours = 24 }
 ) {
   const appUrl = getAppBaseUrl(env);
-  const verifyUrl = `${appUrl}/verify-email?token=${encodeURIComponent(verificationToken)}`;
+  const verifyUrl = `${appUrl}/verify-email#token=${encodeURIComponent(verificationToken)}`;
 
   return dispatchEmail(env, {
     recipientEmail: email,
@@ -253,7 +261,7 @@ export async function sendClientPasswordResetEmail(
   { accountId, email, fullName, resetToken, expiresMinutes = 60 }
 ) {
   const appUrl = getAppBaseUrl(env);
-  const resetUrl = `${appUrl}/reset-password?token=${encodeURIComponent(resetToken)}`;
+  const resetUrl = `${appUrl}/reset-password#token=${encodeURIComponent(resetToken)}`;
 
   return dispatchEmail(env, {
     recipientEmail: email,
@@ -306,7 +314,7 @@ export async function sendAdminInvitationEmail(
   { adminId, email, name, role, inviteToken, expiresHours = 48, invitedByName = 'Super Administrator' }
 ) {
   const appUrl = getAppBaseUrl(env);
-  const inviteUrl = `${appUrl}/admin/accept-invite?token=${encodeURIComponent(inviteToken)}`;
+  const inviteUrl = `${appUrl}/admin/accept-invite#token=${encodeURIComponent(inviteToken)}`;
 
   return dispatchEmail(env, {
     recipientEmail: email,

@@ -1,5 +1,12 @@
 import { generateRandomId } from '../utils/crypto.js';
 import { validateImageUpload } from '../validators/schemas.js';
+import {
+  ALLOWED_ASSET_FOLDERS,
+  ALLOWED_IMAGE_MIME_TYPES,
+  MAX_IMAGE_SIZE_BYTES,
+  MAX_JSON_UPLOAD_BYTES,
+  MAX_MULTIPART_BODY_BYTES,
+} from '../config/constants.js';
 
 const EXTENSION_BY_MIME = {
   'image/jpeg': 'jpg',
@@ -7,7 +14,8 @@ const EXTENSION_BY_MIME = {
   'image/webp': 'webp',
 };
 
-const ALLOWED_FOLDERS = new Set(['portfolio', 'services', 'team', 'general']);
+const ALLOWED_FOLDERS = new Set(ALLOWED_ASSET_FOLDERS);
+const STRICT_ASSET_KEY_PATTERN = /^(portfolio|services|team|general)\/[a-zA-Z0-9._-]+$/;
 
 function sanitizeFolder(folder = 'portfolio') {
   const cleaned = String(folder || 'portfolio')
@@ -38,7 +46,10 @@ export function normalizeAssetKey(keyOrUrl) {
     }
   }
   key = key.replace(/^\/+/, '');
-  if (!key || key.includes('..') || key.includes('\\') || key.includes('\0')) {
+  if (!key || key.includes('..') || key.includes('\\') || /[\u0000-\u001F\u007F]/.test(key)) {
+    return '';
+  }
+  if (!STRICT_ASSET_KEY_PATTERN.test(key)) {
     return '';
   }
   return key;
@@ -49,6 +60,15 @@ function decodeBase64DataUrl(dataUrl) {
   if (!match) return null;
   const mimeType = match[1].toLowerCase();
   const base64Data = match[2];
+  const maxEncodedChars = Math.ceil((MAX_IMAGE_SIZE_BYTES * 4) / 3) + 16;
+  if (base64Data.length > maxEncodedChars) {
+    const err = new Error(
+      `Image file exceeds maximum allowed size of ${Math.round(MAX_IMAGE_SIZE_BYTES / (1024 * 1024))}MB.`
+    );
+    err.status = 413;
+    err.code = 'PAYLOAD_TOO_LARGE';
+    throw err;
+  }
   try {
     const binary = atob(base64Data);
     const bytes = new Uint8Array(binary.length);
@@ -74,12 +94,20 @@ export async function uploadImageToR2(request, env, defaultFolder = 'portfolio')
   }
 
   const contentType = request.headers.get('content-type') || '';
+  const contentLengthHeader = request.headers.get('content-length');
+  const declaredBytes = contentLengthHeader ? Number.parseInt(contentLengthHeader, 10) : 0;
   let mimeType = '';
   let bytes = null;
   let folder = sanitizeFolder(defaultFolder);
   let replaceKey = '';
 
   if (contentType.includes('multipart/form-data')) {
+    if (Number.isFinite(declaredBytes) && declaredBytes > MAX_MULTIPART_BODY_BYTES) {
+      const err = new Error('Uploaded image payload exceeds maximum allowed size.');
+      err.status = 413;
+      err.code = 'PAYLOAD_TOO_LARGE';
+      throw err;
+    }
     let formData;
     try {
       formData = await request.formData();
@@ -96,18 +124,54 @@ export async function uploadImageToR2(request, env, defaultFolder = 'portfolio')
       err.code = 'MISSING_FILE';
       throw err;
     }
+    if (Number.isFinite(file.size) && file.size > MAX_IMAGE_SIZE_BYTES) {
+      const err = new Error(
+        `Image file exceeds maximum allowed size of ${Math.round(MAX_IMAGE_SIZE_BYTES / (1024 * 1024))}MB.`
+      );
+      err.status = 413;
+      err.code = 'PAYLOAD_TOO_LARGE';
+      throw err;
+    }
     const rawFolder = formData.get('folder') || formData.get('entityType');
     if (rawFolder) {
       folder = sanitizeFolder(rawFolder);
     }
-    if (formData.get('replaceKey')) {
-      replaceKey = normalizeAssetKey(String(formData.get('replaceKey')));
+    const rawReplaceKey = formData.get('replaceKey');
+    if (rawReplaceKey !== null && rawReplaceKey !== undefined && String(rawReplaceKey).trim()) {
+      replaceKey = normalizeAssetKey(String(rawReplaceKey));
+      if (!replaceKey) {
+        const err = new Error('Invalid replaceKey specified for image upload.');
+        err.status = 400;
+        err.code = 'INVALID_ASSET_KEY';
+        throw err;
+      }
     }
     mimeType = (file.type || '').toLowerCase();
     const buffer = await file.arrayBuffer();
     bytes = new Uint8Array(buffer);
   } else {
-    const body = await request.json().catch(() => ({}));
+    if (Number.isFinite(declaredBytes) && declaredBytes > MAX_JSON_UPLOAD_BYTES) {
+      const err = new Error('Uploaded image JSON payload exceeds maximum allowed size.');
+      err.status = 413;
+      err.code = 'PAYLOAD_TOO_LARGE';
+      throw err;
+    }
+    const rawText = await request.text().catch(() => '');
+    if (rawText.length > MAX_JSON_UPLOAD_BYTES) {
+      const err = new Error('Uploaded image JSON payload exceeds maximum allowed size.');
+      err.status = 413;
+      err.code = 'PAYLOAD_TOO_LARGE';
+      throw err;
+    }
+    let body = {};
+    try {
+      body = rawText ? JSON.parse(rawText) : {};
+    } catch {
+      const err = new Error('Malformed JSON upload payload.');
+      err.status = 400;
+      err.code = 'INVALID_JSON_PAYLOAD';
+      throw err;
+    }
     let rawDataUrl = body?.dataUrl || body?.data_url || '';
     const rawBase64 = body?.base64Data || body?.base64_data || body?.base64 || '';
     const explicitMime = String(body?.mimeType || body?.mime_type || 'image/png').toLowerCase();
@@ -128,8 +192,15 @@ export async function uploadImageToR2(request, env, defaultFolder = 'portfolio')
     if (rawFolder) {
       folder = sanitizeFolder(rawFolder);
     }
-    if (body.replaceKey || body.replace_key) {
-      replaceKey = normalizeAssetKey(String(body.replaceKey || body.replace_key));
+    const rawReplaceKey = body.replaceKey || body.replace_key;
+    if (rawReplaceKey !== undefined && rawReplaceKey !== null && String(rawReplaceKey).trim()) {
+      replaceKey = normalizeAssetKey(String(rawReplaceKey));
+      if (!replaceKey) {
+        const err = new Error('Invalid replaceKey specified for image upload.');
+        err.status = 400;
+        err.code = 'INVALID_ASSET_KEY';
+        throw err;
+      }
     }
     const decoded = decodeBase64DataUrl(rawDataUrl);
     if (!decoded) {
@@ -250,13 +321,20 @@ export async function serveImageFromR2(env, keyOrUrl) {
     return null;
   }
 
-  const contentType = object.httpMetadata?.contentType || 'image/jpeg';
+  const rawContentType = String(object.httpMetadata?.contentType || 'image/jpeg').toLowerCase();
+  const contentType = ALLOWED_IMAGE_MIME_TYPES.includes(rawContentType)
+    ? rawContentType
+    : 'image/jpeg';
   const body = object.body || (await object.arrayBuffer());
   return new Response(body, {
     status: 200,
     headers: {
       'Content-Type': contentType,
       'Cache-Control': 'public, max-age=31536000, immutable',
+      'X-Content-Type-Options': 'nosniff',
+      'Content-Security-Policy':
+        "default-src 'none'; frame-ancestors 'none'; base-uri 'none'; form-action 'none'",
+      'Cross-Origin-Resource-Policy': 'cross-origin',
     },
   });
 }

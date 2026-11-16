@@ -11,15 +11,31 @@ const COMMON_WEAK_PASSWORDS = new Set([
   'password',
   'password123',
   'password123!',
+  'password1234',
+  'password1234!',
+  'password@123',
   '12345678',
   '123456789',
   '1234567890',
+  '123456789012',
   'qwerty123',
+  'qwerty123456',
   'admin123',
   'admin1234',
+  'admin1234567',
+  'admin@123456',
+  'administrator',
   'letmein123',
+  'letmein12345',
   'welcome123',
+  'welcome12345',
   'changeme123',
+  'changeme1234',
+  'dreamtech123',
+  'dreamtech1234!',
+  'dreamtech@2026!',
+  'kashmir12345',
+  'test12345678!',
 ]);
 
 export function normalizeEmail(email) {
@@ -41,11 +57,49 @@ export function isValidPhone(phone) {
   return digits.length >= 7 && digits.length <= 15;
 }
 
+export function isSafeUrl(value, { allowRelative = true, allowDataImage = false } = {}) {
+  if (value === undefined || value === null || value === '') return true;
+  if (typeof value !== 'string') return false;
+  const trimmed = value.trim();
+  if (!trimmed) return true;
+  if (/[\u0000-\u001F\u007F]/.test(trimmed)) return false;
+
+  if (allowRelative && trimmed.startsWith('/')) {
+    return !trimmed.startsWith('//') && !/^\/\\/.test(trimmed);
+  }
+
+  if (allowDataImage && /^data:image\/(jpeg|png|webp);base64,[A-Za-z0-9+/=]+$/i.test(trimmed)) {
+    return true;
+  }
+
+  let parsed;
+  try {
+    parsed = new URL(trimmed);
+  } catch {
+    return false;
+  }
+
+  if (parsed.protocol !== 'https:' && parsed.protocol !== 'http:') {
+    return false;
+  }
+
+  const hostname = parsed.hostname.toLowerCase();
+  if (
+    hostname === '169.254.169.254' ||
+    hostname === 'metadata.google.internal' ||
+    hostname === '0.0.0.0'
+  ) {
+    return false;
+  }
+
+  return true;
+}
+
 export function validateStrongPassword(password) {
-  if (typeof password !== 'string' || password.length < 8) {
+  if (typeof password !== 'string' || password.length < 12) {
     return {
       isValid: false,
-      error: 'Password must be at least 8 characters long.',
+      error: 'Password must be at least 12 characters long.',
     };
   }
   if (password.length > 128) {
@@ -418,6 +472,19 @@ export function validateTokenInput(body = {}) {
   };
 }
 
+export function validateOrderTrackInput(body = {}) {
+  const errors = {};
+  const token = typeof body.token === 'string' ? body.token.trim() : '';
+  if (!token || token.length < 32 || token.length > 256 || !/^[A-Za-z0-9_-]+$/.test(token)) {
+    errors.token = 'A valid order tracking token is required.';
+  }
+  return {
+    isValid: Object.keys(errors).length === 0,
+    errors,
+    data: { token },
+  };
+}
+
 export function validateForgotPasswordInput(body = {}) {
   const errors = {};
   const email = normalizeEmail(body.email);
@@ -516,6 +583,11 @@ export function validateServiceInput(body = {}, isUpdate = false) {
     ? suitableForRaw.map((s) => sanitizeText(s, 120)).filter(Boolean)
     : [];
 
+  const image = sanitizeText(body.image || '', 1000);
+  if (image && !isSafeUrl(image, { allowRelative: true, allowDataImage: true })) {
+    errors.image = 'Service image must be a valid HTTP(S) URL or internal asset path.';
+  }
+
   const isActiveRaw = body.isActive !== undefined ? body.isActive : body.is_active;
   const displayOrderRaw = body.displayOrder !== undefined ? body.displayOrder : body.display_order;
 
@@ -531,7 +603,7 @@ export function validateServiceInput(body = {}, isUpdate = false) {
       features,
       technologies,
       suitableFor,
-      image: sanitizeText(body.image || '', 1000),
+      image,
       iconName: sanitizeText(body.iconName ?? body.icon_name ?? 'Globe', 60),
       price,
       currency: sanitizeText(body.currency || 'INR', 10),
@@ -668,6 +740,8 @@ export function validatePortfolioInput(body = {}, isUpdate = false) {
   if (thumbnail.startsWith('data:image/') && thumbnail.length > 250000) {
     errors.thumbnail =
       'Large image files must be uploaded through the R2 storage endpoint rather than stored inline in D1.';
+  } else if (thumbnail && !isSafeUrl(thumbnail, { allowRelative: true, allowDataImage: true })) {
+    errors.thumbnail = 'Thumbnail must be a valid HTTP(S) URL or internal asset path.';
   }
 
   const rawImages = Array.isArray(body.images)
@@ -676,6 +750,23 @@ export function validatePortfolioInput(body = {}, isUpdate = false) {
     ? body.gallery
     : [thumbnail].filter(Boolean);
   const images = rawImages.map((img) => sanitizeText(img, 2000)).filter(Boolean);
+  if (images.some((img) => !isSafeUrl(img, { allowRelative: true, allowDataImage: true }))) {
+    errors.images = 'All gallery image entries must be valid HTTP(S) URLs or internal asset paths.';
+  }
+
+  const projectUrl = sanitizeText(body.projectUrl ?? body.project_url ?? body.liveUrl ?? '', 500);
+  const githubUrl = sanitizeText(body.githubUrl ?? body.github_url ?? '', 500);
+  const demoVideoUrl = sanitizeText(body.demoVideoUrl ?? body.demo_video_url ?? '', 500);
+
+  if (projectUrl && !isSafeUrl(projectUrl, { allowRelative: false })) {
+    errors.projectUrl = 'Project URL must use HTTP or HTTPS.';
+  }
+  if (githubUrl && !isSafeUrl(githubUrl, { allowRelative: false })) {
+    errors.githubUrl = 'GitHub URL must use HTTP or HTTPS.';
+  }
+  if (demoVideoUrl && !isSafeUrl(demoVideoUrl, { allowRelative: false })) {
+    errors.demoVideoUrl = 'Demo video URL must use HTTP or HTTPS.';
+  }
 
   const rawKeyFeatures = body.keyFeatures ?? body.key_features;
   const keyFeatures = Array.isArray(rawKeyFeatures)
@@ -718,9 +809,9 @@ export function validatePortfolioInput(body = {}, isUpdate = false) {
       images,
       keyFeatures,
       technologies,
-      projectUrl: sanitizeText(body.projectUrl ?? body.project_url ?? body.liveUrl ?? '', 500),
-      githubUrl: sanitizeText(body.githubUrl ?? body.github_url ?? '', 500),
-      demoVideoUrl: sanitizeText(body.demoVideoUrl ?? body.demo_video_url ?? '', 500),
+      projectUrl,
+      githubUrl,
+      demoVideoUrl,
       status: sanitizeText(body.status || 'Completed', 80),
       completionDate: sanitizeText(body.completionDate ?? body.completion_date ?? '', 80),
       isSample: Boolean(body.isSample ?? body.is_sample),

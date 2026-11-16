@@ -223,17 +223,28 @@ paths:
           description: Worker is running and operational
   /ready:
     get:
-      summary: Infrastructure Readiness Check (Verifies D1 Connection, 18 Schema Tables & R2 Storage)
+      summary: Infrastructure Readiness Check (Verifies D1 Connection, 19 Schema Tables & R2 Storage)
       tags: [System]
       responses:
         '200':
           description: D1 database, schema tables, and R2 storage are ready
         '503':
           description: One or more required dependencies (D1, schema tables, or R2) are not ready
+  /auth/csrf:
+    get:
+      summary: Issue Double-Submit CSRF Cookie & Token for Admin Auth
+      tags: [Authentication]
+      responses:
+        '200':
+          description: Host-only HttpOnly CSRF cookie set (`dtks_csrf`) and `csrfToken` returned
   /auth/login:
     post:
-      summary: Admin Login
+      summary: Admin Login (Cookie Default; Pass X-Auth-Mode Bearer Header for JSON Tokens)
       tags: [Authentication]
+      parameters:
+        - name: X-Auth-Mode
+          in: header
+          schema: { type: string, enum: [cookie, bearer] }
       requestBody:
         required: true
         content:
@@ -246,12 +257,12 @@ paths:
                 password: { type: string }
       responses:
         '200':
-          description: Authenticated successfully
+          description: Authenticated successfully (sets HttpOnly cookies by default; returns tokens in JSON only with X-Auth-Mode bearer)
         '401':
           description: Invalid credentials
   /auth/refresh:
     post:
-      summary: Rotate Refresh Token
+      summary: Rotate Refresh Token (Cookie + X-CSRF-Token Default or X-Auth-Mode Bearer)
       tags: [Authentication]
       requestBody:
         content:
@@ -262,9 +273,11 @@ paths:
                 refreshToken: { type: string }
       responses:
         '200':
-          description: New access & refresh tokens issued
+          description: New access & refresh tokens issued (triggers replay cascade revocation if rotated token is reused)
         '401':
-          description: Invalid or expired refresh token
+          description: Invalid, expired, or replayed refresh token (`REFRESH_TOKEN_REPLAY_DETECTED`)
+        '403':
+          description: CSRF validation failed for cookie-authenticated refresh
   /auth/logout:
     post:
       summary: Admin Logout & Session Revocation
@@ -345,8 +358,8 @@ paths:
               required: [currentPassword, newPassword]
               properties:
                 currentPassword: { type: string }
-                newPassword: { type: string, minLength: 8 }
-                confirmPassword: { type: string, minLength: 8 }
+                newPassword: { type: string, minLength: 12 }
+                confirmPassword: { type: string, minLength: 12 }
       responses:
         '200':
           description: Password updated and refresh sessions revoked
@@ -363,8 +376,8 @@ paths:
               required: [token, password, confirmPassword]
               properties:
                 token: { type: string }
-                password: { type: string, minLength: 8 }
-                confirmPassword: { type: string, minLength: 8 }
+                password: { type: string, minLength: 12 }
+                confirmPassword: { type: string, minLength: 12 }
       responses:
         '200':
           description: Admin account activated
@@ -406,9 +419,9 @@ paths:
               description: Provide either `newPassword` or `password` along with matching `confirmPassword`.
               properties:
                 token: { type: string }
-                newPassword: { type: string, minLength: 8 }
-                password: { type: string, minLength: 8 }
-                confirmPassword: { type: string, minLength: 8 }
+                newPassword: { type: string, minLength: 12 }
+                password: { type: string, minLength: 12 }
+                confirmPassword: { type: string, minLength: 12 }
       responses:
         '200':
           description: Password reset, `token_version` incremented, and all active `refresh_sessions` revoked
@@ -596,6 +609,13 @@ paths:
       responses:
         '200':
           description: Sessions revoked and token_version incremented
+  /client/auth/csrf:
+    get:
+      summary: Issue Double-Submit CSRF Cookie & Token for Client Auth
+      tags: [Client Authentication]
+      responses:
+        '200':
+          description: Host-only HttpOnly CSRF cookie set (`dtks_client_csrf`) and `csrfToken` returned
   /client/auth/register:
     post:
       summary: Register Public Client Account (Requires Email Verification)
@@ -613,22 +633,22 @@ paths:
                 phone: { type: string }
                 city: { type: string }
                 businessName: { type: string }
-                password: { type: string, minLength: 8 }
-                confirmPassword: { type: string, minLength: 8 }
+                password: { type: string, minLength: 12 }
+                confirmPassword: { type: string, minLength: 12 }
                 acceptTerms: { type: boolean, enum: [true] }
                 acceptPrivacy: { type: boolean }
       responses:
         '201':
-          description: Client registered with persisted legal acceptance and verification email dispatched
+          description: Client registered with persisted legal acceptance and #token= verification email dispatched
         '400':
-          description: Validation error (including missing acceptTerms or password mismatch)
+          description: Validation error (including missing acceptTerms, weak password <12 chars, or password mismatch)
         '409':
           description: Registration conflict
         '503':
-          description: Account created pending verification, but email provider unavailable/failed (`accountCreated`, `accountPendingVerification`, `verificationEmailSent`, `canResendVerification`, `deliveryStatus`)
+          description: Account created pending verification, but email provider unavailable/failed or production rate limiter unavailable
   /client/auth/resend-verification:
     post:
-      summary: Resend Client Verification Email
+      summary: Resend Client Verification Email (Uniform Anti-Enumeration)
       tags: [Client Authentication]
       requestBody:
         required: true
@@ -641,9 +661,11 @@ paths:
                 email: { type: string, format: email }
       responses:
         '200':
-          description: Uniform confirmation returned when provider is configured and dispatch succeeds (or email does not match an active unverified account)
+          description: Uniform confirmation returned whenever provider is configured (delivery failures revoke only the failed token and are logged internally without enumeration)
+        '429':
+          description: Rate limit exceeded (`clientVerification` IP + HMAC email limits)
         '503':
-          description: Email provider unconfigured or upstream Resend delivery failed (`EMAIL_PROVIDER_UNCONFIGURED` / `EMAIL_DELIVERY_FAILED`)
+          description: Email provider unconfigured or production rate limiter unavailable (`EMAIL_PROVIDER_UNCONFIGURED` / `RATE_LIMITER_UNAVAILABLE`)
   /client/auth/verify-email:
     post:
       summary: Verify Client Email & Safely Link Existing Customer Record
@@ -772,14 +794,14 @@ paths:
               required: [currentPassword, newPassword]
               properties:
                 currentPassword: { type: string }
-                newPassword: { type: string, minLength: 8 }
-                confirmPassword: { type: string, minLength: 8 }
+                newPassword: { type: string, minLength: 12 }
+                confirmPassword: { type: string, minLength: 12 }
       responses:
         '200':
           description: Password updated and active sessions revoked
   /client/auth/forgot-password:
     post:
-      summary: Request Client Password Reset Email
+      summary: Request Client Password Reset Email (Uniform Anti-Enumeration)
       tags: [Client Authentication]
       requestBody:
         required: true
@@ -792,9 +814,11 @@ paths:
                 email: { type: string, format: email }
       responses:
         '200':
-          description: Uniform confirmation returned when provider is configured
+          description: Uniform confirmation returned whenever provider is configured (delivery failures revoke only the failed token and are logged internally)
+        '429':
+          description: Rate limit exceeded (`clientPasswordReset` IP + HMAC email limits)
         '503':
-          description: Email provider unconfigured
+          description: Email provider unconfigured or production rate limiter unavailable
   /client/auth/reset-password:
     post:
       summary: Reset Client Password with Single-Use Token
@@ -809,9 +833,9 @@ paths:
               description: Provide either `password` or `newPassword` along with matching `confirmPassword`.
               properties:
                 token: { type: string }
-                password: { type: string, minLength: 8 }
-                newPassword: { type: string, minLength: 8 }
-                confirmPassword: { type: string, minLength: 8 }
+                password: { type: string, minLength: 12 }
+                newPassword: { type: string, minLength: 12 }
+                confirmPassword: { type: string, minLength: 12 }
       responses:
         '200':
           description: Password reset and existing sessions revoked
@@ -1286,21 +1310,25 @@ paths:
         '200':
           description: Orders list
   /orders/track:
-    get:
-      summary: Track Order Status by Reference Number & Email (Public)
+    post:
+      summary: Track Order Status by Private SHA-256-Hashed Tracking Token (Public, Non-PII Summary)
       tags: [Orders]
-      parameters:
-        - name: ref
-          in: query
-          required: true
-          schema: { type: string }
-        - name: email
-          in: query
-          required: true
-          schema: { type: string, format: email }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [token]
+              properties:
+                token: { type: string, minLength: 32 }
       responses:
         '200':
-          description: Order tracking record
+          description: Non-PII order status & history summary
+        '404':
+          description: Uniform not found for invalid, expired, or revoked tracking token (`ORDER_NOT_FOUND`)
+        '429':
+          description: Rate limit exceeded (`orderTracking` / `orderTrackingToken`)
   /orders/{id}:
     get:
       summary: Get Order Details & History (Admin)
