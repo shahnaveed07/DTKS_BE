@@ -213,9 +213,15 @@ describe('DTKS Admin Forgot Password & Reset Password Suite (/api/v1/auth/*)', (
 
   function extractTokenFromEmailText(emailPayload) {
     assert.ok(emailPayload, 'Expected email payload');
-    const match = /\?token=([a-f0-9]+)/i.exec(emailPayload.text || '');
-    assert.ok(match && match[1], 'Expected raw token inside email reset link');
-    return match[1];
+    const adminFragmentMatch = /\/admin\/reset-password#token=([a-f0-9]+)/i.exec(
+      emailPayload.text || ''
+    );
+    if (adminFragmentMatch?.[1]) {
+      return adminFragmentMatch[1];
+    }
+    const clientQueryMatch = /\?token=([a-f0-9]+)/i.exec(emailPayload.text || '');
+    assert.ok(clientQueryMatch && clientQueryMatch[1], 'Expected raw token inside email reset link');
+    return clientQueryMatch[1];
   }
 
   it('0. Migration & Schema Readiness: admin_auth_tokens exists and GET /api/v1/ready succeeds', async () => {
@@ -263,7 +269,8 @@ describe('DTKS Admin Forgot Password & Reset Password Suite (/api/v1/auth/*)', (
     assert.equal(invalidEmailRes.status, 400);
     assert.equal(invalidEmailRes.json.error.code, 'VALIDATION_ERROR');
 
-    // 7. Resend API delivery failure for eligible admin returns 503 EMAIL_DELIVERY_FAILED
+    // 7. Resend API delivery failure for eligible admin STILL returns uniform 200 (anti-enumeration),
+    // immediately revokes the newly generated token, and logs an internal audit event
     emailMode = 'fail_all';
     const failSendRes = await apiRequest('/api/v1/auth/forgot-password', {
       method: 'POST',
@@ -271,12 +278,31 @@ describe('DTKS Admin Forgot Password & Reset Password Suite (/api/v1/auth/*)', (
       body: { email: ACTIVE_ADMIN_EMAIL },
     });
     emailMode = 'ok';
-    assert.equal(failSendRes.status, 503);
-    assert.equal(failSendRes.json.error.code, 'EMAIL_DELIVERY_FAILED');
-    assert.equal(failSendRes.json.error.details.resetEmailSent, false);
+    assert.equal(failSendRes.status, 200);
+    assert.equal(failSendRes.json.success, true);
+    assert.deepEqual(failSendRes.json.data, { requested: true });
+    assert.equal(
+      failSendRes.json.message,
+      'If an eligible administrator account exists for that email address, a password reset email has been sent.'
+    );
     assert.equal(capturedEmails.length, baselineEmailCount);
 
-    // 1. Active admin (with whitespace/mixed case) receives branded reset email
+    const failedTokenRow = await env.DB.prepare(
+      "SELECT id, token_hash, used_at, revoked_at FROM admin_auth_tokens WHERE admin_id = ? AND purpose = 'password_reset' ORDER BY created_at DESC LIMIT 1"
+    )
+      .bind(activeAdminId)
+      .first();
+    assert.ok(failedTokenRow, 'Failed delivery row should be recorded and immediately revoked');
+    assert.equal(failedTokenRow.used_at, null);
+    assert.ok(failedTokenRow.revoked_at, 'Token from failed email delivery must be revoked immediately');
+
+    const failedAuditRow = await env.DB.prepare(
+      "SELECT action, details FROM activity_logs WHERE action = 'ADMIN_PASSWORD_RESET_DELIVERY_FAILED' ORDER BY timestamp DESC LIMIT 1"
+    ).first();
+    assert.ok(failedAuditRow, 'Internal security/audit event must be recorded for failed delivery');
+    assert.ok(failedAuditRow.details.includes('failed'));
+
+    // 1. Active admin (with whitespace/mixed case) receives branded reset email with #token= fragment link
     const activeForgotRes = await apiRequest('/api/v1/auth/forgot-password', {
       method: 'POST',
       ip: '198.51.100.5',
@@ -284,14 +310,21 @@ describe('DTKS Admin Forgot Password & Reset Password Suite (/api/v1/auth/*)', (
     });
     assert.equal(activeForgotRes.status, 200);
     assert.equal(activeForgotRes.json.success, true);
-    assert.equal(activeForgotRes.json.data.requested, true);
+    assert.deepEqual(activeForgotRes.json.data, failSendRes.json.data);
+    assert.equal(activeForgotRes.json.message, failSendRes.json.message);
     assert.equal(capturedEmails.length, baselineEmailCount + 1);
 
     const resetEmail = extractLatestEmail(ACTIVE_ADMIN_EMAIL);
     assert.equal(resetEmail.subject, '[DTKS Admin] Reset your administrator password');
     assert.ok(resetEmail.text.includes('Hello Operations Manager,'));
     assert.ok(
-      resetEmail.text.includes('https://dreamtechkashmirsolutions.studio/admin/reset-password?token=')
+      resetEmail.text.includes('https://dreamtechkashmirsolutions.studio/admin/reset-password#token='),
+      'Admin reset email must deliver token via URL fragment (#token=)'
+    );
+    assert.equal(
+      resetEmail.text.includes('/admin/reset-password?token='),
+      false,
+      'Admin reset email must NOT deliver token in URL query string (?token=)'
     );
     assert.ok(resetEmail.text.includes('60 minutes'));
     assert.ok(resetEmail.text.includes('Security Notice:'));
@@ -661,20 +694,20 @@ describe('DTKS Admin Forgot Password & Reset Password Suite (/api/v1/auth/*)', (
     assert.equal(pendResetRes.status, 403);
     assert.equal(pendResetRes.json.error.code, 'INVITE_PENDING');
 
-    // 22a. Dedicated rate limiting enforced (max 8 requests / 15 min per IP across adminPasswordReset)
+    // 22a. Dedicated per-IP rate limiting enforced (max 8 requests / 15 min per IP across adminPasswordReset)
     const rateIp = '203.0.113.99';
     for (let i = 0; i < 8; i++) {
       const okAttempt = await apiRequest('/api/v1/auth/forgot-password', {
         method: 'POST',
         ip: rateIp,
-        body: { email: 'rate-check-nonexistent@dtks-test.studio' },
+        body: { email: `rate-check-${i}@dtks-test.studio` },
       });
       assert.equal(okAttempt.status, 200);
     }
     const ninthForgot = await apiRequest('/api/v1/auth/forgot-password', {
       method: 'POST',
       ip: rateIp,
-      body: { email: 'rate-check-nonexistent@dtks-test.studio' },
+      body: { email: 'rate-check-9@dtks-test.studio' },
     });
     assert.equal(ninthForgot.status, 429);
     assert.equal(ninthForgot.json.error.code, 'RATE_LIMIT_EXCEEDED');
@@ -728,5 +761,259 @@ describe('DTKS Admin Forgot Password & Reset Password Suite (/api/v1/auth/*)', (
       body: { email: SUPER_ADMIN_EMAIL, password: SUPER_ADMIN_PASSWORD },
     });
     assert.equal(reloginOriginal.status, 200);
+  });
+
+  it('23–27. Security Hardening: Delivery-failure preserves unrelated valid tokens, HMAC email/token rate limits across IPs, production fail-closed limiter & atomic DB expiry', async () => {
+    await resetRateLimiter(env);
+
+    // 23. Prior valid token for same admin and unrelated tokens for other admins stay valid if a subsequent delivery fails
+    const okReq = await apiRequest('/api/v1/auth/forgot-password', {
+      method: 'POST',
+      ip: '198.51.100.60',
+      body: { email: ACTIVE_ADMIN_EMAIL },
+    });
+    assert.equal(okReq.status, 200);
+    const stillValidToken = extractTokenFromEmailText(extractLatestEmail(ACTIVE_ADMIN_EMAIL));
+    const stillValidHash = await sha256Hex(stillValidToken);
+
+    emailMode = 'fail_all';
+    const failWhileExisting = await apiRequest('/api/v1/auth/forgot-password', {
+      method: 'POST',
+      ip: '198.51.100.61',
+      body: { email: ACTIVE_ADMIN_EMAIL },
+    });
+    emailMode = 'ok';
+    assert.equal(failWhileExisting.status, 200);
+    assert.deepEqual(failWhileExisting.json.data, { requested: true });
+
+    const existingRowAfterFail = await env.DB.prepare(
+      'SELECT revoked_at, used_at FROM admin_auth_tokens WHERE token_hash = ?'
+    )
+      .bind(stillValidHash)
+      .first();
+    assert.equal(
+      existingRowAfterFail.revoked_at,
+      null,
+      'Unrelated prior valid token must remain unrevoked when new delivery fails'
+    );
+
+    const activeFailedCount = await env.DB.prepare(
+      `SELECT COUNT(*) AS cnt FROM admin_auth_tokens
+       WHERE admin_id = ? AND purpose = 'password_reset' AND used_at IS NULL AND revoked_at IS NULL`
+    )
+      .bind(activeAdminId)
+      .first();
+    assert.equal(Number(activeFailedCount.cnt), 1, 'Only the previously delivered token remains active');
+
+    // Verify stillValidToken actually resets password cleanly
+    const completeValidRes = await apiRequest('/api/v1/auth/reset-password', {
+      method: 'POST',
+      ip: '198.51.100.62',
+      body: {
+        token: stillValidToken,
+        newPassword: 'AfterFailKeep#2026!',
+        confirmPassword: 'AfterFailKeep#2026!',
+      },
+    });
+    assert.equal(completeValidRes.status, 200);
+
+    // 24. Distributed target-email rate limiting across different IPs (keyed via HMAC, NEVER raw email in rate_limits)
+    await resetRateLimiter(env);
+    const targetedEmail = 'target-flood@dtks-test.studio';
+    const customEmailLimitEnv = { ...env, ADMIN_PASSWORD_RESET_EMAIL_MAX: '3' };
+    for (let i = 0; i < 3; i++) {
+      const res = await apiRequest('/api/v1/auth/forgot-password', {
+        method: 'POST',
+        ip: `198.51.101.${10 + i}`, // different IP every attempt
+        customEnv: customEmailLimitEnv,
+        body: { email: i % 2 === 0 ? targetedEmail : targetedEmail.toUpperCase() },
+      });
+      assert.equal(res.status, 200);
+    }
+    const fourthAcrossIps = await apiRequest('/api/v1/auth/forgot-password', {
+      method: 'POST',
+      ip: '198.51.101.99',
+      customEnv: customEmailLimitEnv,
+      body: { email: `  ${targetedEmail}  ` },
+    });
+    assert.equal(fourthAcrossIps.status, 429);
+    assert.equal(fourthAcrossIps.json.error.code, 'RATE_LIMIT_EXCEEDED');
+
+    // Admin account was NOT locked out (`is_active` preserved on active admins)
+    const activeAdminCheck = await env.DB.prepare('SELECT is_active FROM admins WHERE id = ?')
+      .bind(activeAdminId)
+      .first();
+    assert.equal(activeAdminCheck.is_active, 1);
+
+    // Confirm raw email & raw tokens NEVER appear in rate_limits table
+    const rateKeys = await env.DB.prepare('SELECT rate_key FROM rate_limits').all();
+    const serializedKeys = JSON.stringify(rateKeys.results || []);
+    assert.equal(serializedKeys.includes(targetedEmail), false, 'Raw email must never be stored in rate_limits');
+    assert.ok(serializedKeys.includes('adminPasswordResetEmail:em:'));
+
+    // 25. Distributed token-attempt rate limiting across different IPs (keyed via HMAC, NEVER raw token or token_hash)
+    const probedToken = 'a'.repeat(64);
+    const probedTokenSha256 = await sha256Hex(probedToken);
+    const customTokenLimitEnv = { ...env, ADMIN_PASSWORD_RESET_TOKEN_MAX: '3' };
+    for (let i = 0; i < 3; i++) {
+      const res = await apiRequest('/api/v1/auth/reset-password', {
+        method: 'POST',
+        ip: `198.51.102.${10 + i}`,
+        customEnv: customTokenLimitEnv,
+        body: {
+          token: probedToken,
+          newPassword: 'TokenProbe#2026!Strong',
+          confirmPassword: 'TokenProbe#2026!Strong',
+        },
+      });
+      assert.equal(res.status, 400);
+      assert.equal(res.json.error.code, 'INVALID_RESET_TOKEN');
+    }
+    const fourthTokenAttempt = await apiRequest('/api/v1/auth/reset-password', {
+      method: 'POST',
+      ip: '198.51.102.99',
+      customEnv: customTokenLimitEnv,
+      body: {
+        token: probedToken,
+        newPassword: 'TokenProbe#2026!Strong',
+        confirmPassword: 'TokenProbe#2026!Strong',
+      },
+    });
+    assert.equal(fourthTokenAttempt.status, 429);
+    assert.equal(fourthTokenAttempt.json.error.code, 'RATE_LIMIT_EXCEEDED');
+
+    const rateKeysAfterTok = await env.DB.prepare('SELECT rate_key FROM rate_limits').all();
+    const serializedTokKeys = JSON.stringify(rateKeysAfterTok.results || []);
+    assert.equal(serializedTokKeys.includes(probedToken), false, 'Raw token must never be stored in rate_limits');
+    assert.equal(
+      serializedTokKeys.includes(probedTokenSha256),
+      false,
+      'Rate-limit token key must use keyed HMAC rather than matching DB token_hash'
+    );
+    assert.ok(serializedTokKeys.includes('adminPasswordResetToken:tok:'));
+
+    // 26. Fail closed in production (`ENVIRONMENT === 'production'`) when distributed rate limiter fails/unavailable
+    const failingRateLimitDb = {
+      prepare() {
+        return {
+          bind() {
+            return this;
+          },
+          async first() {
+            throw new Error('Simulated D1 outage');
+          },
+          async run() {
+            throw new Error('Simulated D1 outage');
+          },
+        };
+      },
+    };
+    const prodFailClosedEnv = {
+      ...env,
+      ENVIRONMENT: 'production',
+      DB: failingRateLimitDb,
+      ADMIN_RESET_RATE_LIMITER: null,
+      RATE_LIMITER: null,
+    };
+    const prodForgotFailClosed = await apiRequest('/api/v1/auth/forgot-password', {
+      method: 'POST',
+      ip: '203.0.113.200',
+      customEnv: prodFailClosedEnv,
+      body: { email: ACTIVE_ADMIN_EMAIL },
+    });
+    assert.equal(prodForgotFailClosed.status, 503);
+    assert.equal(prodForgotFailClosed.json.error.code, 'RATE_LIMITER_UNAVAILABLE');
+
+    const prodResetFailClosed = await apiRequest('/api/v1/auth/reset-password', {
+      method: 'POST',
+      ip: '203.0.113.201',
+      customEnv: prodFailClosedEnv,
+      body: {
+        token: 'd'.repeat(64),
+        newPassword: 'ProdFailClosed#2026!',
+        confirmPassword: 'ProdFailClosed#2026!',
+      },
+    });
+    assert.equal(prodResetFailClosed.status, 503);
+    assert.equal(prodResetFailClosed.json.error.code, 'RATE_LIMITER_UNAVAILABLE');
+
+    // Native ADMIN_RESET_RATE_LIMITER binding rejects cleanly when returning { success: false }
+    const nativeRejectedEnv = {
+      ...env,
+      ENVIRONMENT: 'production',
+      ADMIN_RESET_RATE_LIMITER: {
+        async limit() {
+          return { success: false };
+        },
+      },
+    };
+    const nativeBlocked = await apiRequest('/api/v1/auth/forgot-password', {
+      method: 'POST',
+      ip: '203.0.113.202',
+      customEnv: nativeRejectedEnv,
+      body: { email: ACTIVE_ADMIN_EMAIL },
+    });
+    assert.equal(nativeBlocked.status, 429);
+    assert.equal(nativeBlocked.json.error.code, 'RATE_LIMIT_EXCEEDED');
+
+    // 27. Atomic DB-level expiry enforcement inside UPDATE predicate (`julianday(expires_at) > julianday(?)`)
+    // Verify that even if an initial read saw an unexpired row that expired right before the UPDATE claim,
+    // the atomic UPDATE returns 0 changes and rejects with RESET_TOKEN_EXPIRED.
+    await resetRateLimiter(env);
+    const raceExpiryRaw = 'ab'.repeat(32);
+    const raceExpiryHash = await sha256Hex(raceExpiryRaw);
+    const futureStr = new Date(Date.now() + 60000).toISOString();
+    await env.DB.prepare(
+      `INSERT INTO admin_auth_tokens (id, admin_id, purpose, token_hash, expires_at, created_at)
+       VALUES ('atok-atomic-exp-1', ?, 'password_reset', ?, ?, datetime('now'))`
+    )
+      .bind(activeAdminId, raceExpiryHash, futureStr)
+      .run();
+
+    // Flip expires_at to the past ONLY when the SELECT on admins runs (simulating expiration between read & atomic claim)
+    let flipped = false;
+    const baseDb = env.DB;
+    const raceExpiryDb = {
+      async batch(stmts) {
+        return baseDb.batch(stmts);
+      },
+      prepare(sql) {
+        const stmt = baseDb.prepare(sql);
+        if (!flipped && /FROM admins WHERE id = \?/i.test(sql)) {
+          flipped = true;
+          const origBind = stmt.bind.bind(stmt);
+          stmt.bind = (...args) => {
+            const bound = origBind(...args);
+            const origFirst = bound.first.bind(bound);
+            bound.first = async () => {
+              await baseDb
+                .prepare("UPDATE admin_auth_tokens SET expires_at = '2020-01-01T00:00:00.000Z' WHERE id = 'atok-atomic-exp-1'")
+                .run();
+              return origFirst();
+            };
+            return bound;
+          };
+        }
+        return stmt;
+      },
+    };
+
+    const atomicExpiredRes = await apiRequest('/api/v1/auth/reset-password', {
+      method: 'POST',
+      ip: '198.51.103.10',
+      customEnv: { ...env, DB: raceExpiryDb },
+      body: {
+        token: raceExpiryRaw,
+        newPassword: 'AtomicExpiryFail#2026!',
+        confirmPassword: 'AtomicExpiryFail#2026!',
+      },
+    });
+    assert.equal(atomicExpiredRes.status, 400);
+    assert.equal(atomicExpiredRes.json.error.code, 'RESET_TOKEN_EXPIRED');
+
+    const tokenAfterRace = await env.DB.prepare(
+      "SELECT used_at FROM admin_auth_tokens WHERE id = 'atok-atomic-exp-1'"
+    ).first();
+    assert.equal(tokenAfterRace.used_at, null, 'Expired token must NOT be claimed as used');
   });
 });

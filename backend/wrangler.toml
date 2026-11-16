@@ -24,6 +24,10 @@ JWT_REFRESH_EXPIRES_IN = "604800"
 EMAIL_FROM_ADDRESS = "notifications@dreamtechkashmirsolutions.studio"
 ADMIN_NOTIFICATION_EMAIL = "contact@dreamtechkashmirsolutions.studio"
 INITIAL_ADMIN_NAME = "DTKS Principal Administrator"
+ADMIN_PASSWORD_RESET_WINDOW_SECONDS = "900"
+ADMIN_PASSWORD_RESET_IP_MAX = "8"
+ADMIN_PASSWORD_RESET_EMAIL_MAX = "5"
+ADMIN_PASSWORD_RESET_TOKEN_MAX = "8"
 
 # ==============================================================================
 # Required Production Secrets (Set via `npx wrangler secret put <SECRET_NAME>`):
@@ -44,6 +48,15 @@ migrations_dir = "migrations"
 [[r2_buckets]]
 binding = "ASSETS_BUCKET"
 bucket_name = "dtks-portfolio-assets"
+
+# Cloudflare Native Edge Rate Limiting Binding for Admin Password Recovery
+[[ratelimits]]
+name = "ADMIN_RESET_RATE_LIMITER"
+namespace_id = "1001"
+
+[ratelimits.simple]
+limit = 8
+period = 60
 
 # Explicit `[env.production]` target matching the top-level `dtks-be` Worker
 # so both `npx wrangler deploy` and `npx wrangler deploy --env production`
@@ -66,6 +79,10 @@ JWT_REFRESH_EXPIRES_IN = "604800"
 EMAIL_FROM_ADDRESS = "notifications@dreamtechkashmirsolutions.studio"
 ADMIN_NOTIFICATION_EMAIL = "contact@dreamtechkashmirsolutions.studio"
 INITIAL_ADMIN_NAME = "DTKS Principal Administrator"
+ADMIN_PASSWORD_RESET_WINDOW_SECONDS = "900"
+ADMIN_PASSWORD_RESET_IP_MAX = "8"
+ADMIN_PASSWORD_RESET_EMAIL_MAX = "5"
+ADMIN_PASSWORD_RESET_TOKEN_MAX = "8"
 
 [[env.production.d1_databases]]
 binding = "DB"
@@ -76,3 +93,11 @@ migrations_dir = "migrations"
 [[env.production.r2_buckets]]
 binding = "ASSETS_BUCKET"
 bucket_name = "dtks-portfolio-assets"
+
+[[env.production.ratelimits]]
+name = "ADMIN_RESET_RATE_LIMITER"
+namespace_id = "1001"
+
+[env.production.ratelimits.simple]
+limit = 8
+period = 60

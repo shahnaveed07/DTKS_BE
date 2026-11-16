@@ -44,9 +44,11 @@
 
 ## 4. Rate Limiting & Abuse Controls (`backend/src/middleware/rateLimiter.js`)
 
-- Uses atomic SQLite `INSERT INTO rate_limits ... ON CONFLICT(rate_key) DO UPDATE ... RETURNING window_start, request_count` inside D1 so concurrent requests cannot bypass counters via read-modify-write races.
+- Uses atomic SQLite `INSERT INTO rate_limits ... ON CONFLICT(rate_key) DO UPDATE ... RETURNING window_start, request_count` inside D1 so concurrent requests cannot bypass counters via read-modify-write races, optionally paired with Cloudflare's native `ADMIN_RESET_RATE_LIMITER` binding (`8` req / `60s` edge burst guard).
 - In `ENVIRONMENT === 'production'`, `getClientIp()` relies strictly on Cloudflare's trusted `CF-Connecting-IP` header rather than client-spoofable `X-Forwarded-For`.
-- Dedicated thresholds protect `authLogin` (10/15m), `authRefresh` (30/15m), `clientRegister` (10/15m), `clientVerifyEmail` (15/15m), `passwordReset` (8/15m), `adminInvite` (20/15m), `publicSubmission` (12/15m), and `generalApi` (300/15m).
+- Dedicated thresholds protect `authLogin` (10/15m), `authRefresh` (30/15m), `clientRegister` (10/15m), `clientVerifyEmail` (15/15m), `passwordReset` (8/15m), `adminPasswordReset` (8/15m per IP), `adminPasswordResetEmail` (5/15m per normalized email HMAC across all IPs), `adminPasswordResetToken` (8/15m per token HMAC across all IPs), `adminInvite` (20/15m), `publicSubmission` (25/10m), and `generalApi` (240/1m).
+- Target emails and reset tokens used as rate-limit keys are hashed using keyed HMAC-SHA256 (`RATE_LIMIT_HMAC_SECRET` / `JWT_SECRET`) so plaintext emails and tokens are never stored in `rate_limits`.
+- Sensitive Admin password-recovery endpoints fail closed (`503 RATE_LIMITER_UNAVAILABLE`) in `ENVIRONMENT === 'production'` if distributed rate limiting fails or is unavailable rather than falling back to isolate-local memory.
 
 ---
 

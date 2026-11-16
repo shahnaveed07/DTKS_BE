@@ -336,7 +336,7 @@ export async function sendAdminPasswordResetEmail(
 ) {
   const appUrl = getAppBaseUrl(env);
   const contactEmail = env?.ADMIN_NOTIFICATION_EMAIL || 'contact@dreamtechkashmirsolutions.studio';
-  const resetUrl = `${appUrl}/admin/reset-password?token=${encodeURIComponent(resetToken)}`;
+  const resetUrl = `${appUrl}/admin/reset-password#token=${encodeURIComponent(resetToken)}`;
 
   return dispatchEmail(env, {
     recipientEmail: email,

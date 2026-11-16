@@ -1,12 +1,17 @@
 import { errorResponse } from '../utils/response.js';
+import { hmacSha256Hex } from '../utils/crypto.js';
+import { getJwtSecret } from './authMiddleware.js';
 
 /**
  * Distributed Sliding-Window Rate Limiter (Cloudflare D1 + Native Rate Limiting Binding)
  *
  * Production Order of Precedence:
- *   1. Cloudflare Native Rate Limiting binding (`env.RATE_LIMITER.limit({ key })`), if bound.
+ *   1. Cloudflare Native Rate Limiting binding (`env.ADMIN_RESET_RATE_LIMITER` for admin
+ *      password recovery or `env.RATE_LIMITER`), if bound.
  *   2. Cloudflare D1 Distributed `rate_limits` table (`env.DB`), shared across all Worker isolates.
- *   3. Local in-memory Map fallback (used only when `env.DB` is unavailable).
+ *   3. Local in-memory Map fallback (non-sensitive endpoints or non-production only).
+ *      Sensitive Admin password-recovery policies FAIL CLOSED (`503 RATE_LIMITER_UNAVAILABLE`)
+ *      in production when distributed backing is unavailable or fails.
  */
 
 const memoryBuckets = new Map();
@@ -41,7 +46,25 @@ export const RATE_LIMIT_POLICIES = {
   adminPasswordReset: {
     windowMs: 15 * 60 * 1000, // 15 minutes
     maxRequests: 8,
+    failClosedInProd: true,
+    nativeBinding: 'ADMIN_RESET_RATE_LIMITER',
     message: 'Too many administrator password reset requests. Please wait 15 minutes before trying again.',
+  },
+  adminPasswordResetEmail: {
+    windowMs: 15 * 60 * 1000, // 15 minutes
+    maxRequests: 5,
+    failClosedInProd: true,
+    nativeBinding: 'ADMIN_RESET_RATE_LIMITER',
+    message:
+      'Too many administrator password reset requests for this email address. Please wait 15 minutes before trying again.',
+  },
+  adminPasswordResetToken: {
+    windowMs: 15 * 60 * 1000, // 15 minutes
+    maxRequests: 8,
+    failClosedInProd: true,
+    nativeBinding: 'ADMIN_RESET_RATE_LIMITER',
+    message:
+      'Too many password reset attempts for this reset token. Please request a new reset link or wait 15 minutes.',
   },
   adminInvite: {
     windowMs: 15 * 60 * 1000, // 15 minutes
@@ -60,12 +83,77 @@ export const RATE_LIMIT_POLICIES = {
   },
 };
 
+function parsePositiveInt(raw, fallback) {
+  const num = Number.parseInt(String(raw ?? ''), 10);
+  return Number.isFinite(num) && num > 0 ? num : fallback;
+}
+
+function isProductionEnv(env) {
+  return String(env?.ENVIRONMENT || '').toLowerCase() === 'production';
+}
+
+export function getAdminResetRateLimitConfig(env = {}) {
+  const windowSeconds = parsePositiveInt(
+    env?.ADMIN_PASSWORD_RESET_WINDOW_SECONDS ?? env?.ADMIN_RESET_WINDOW_SECONDS,
+    900
+  );
+  return {
+    windowMs: windowSeconds * 1000,
+    ipMax: parsePositiveInt(
+      env?.ADMIN_PASSWORD_RESET_IP_MAX ?? env?.ADMIN_RESET_IP_MAX,
+      RATE_LIMIT_POLICIES.adminPasswordReset.maxRequests
+    ),
+    emailMax: parsePositiveInt(
+      env?.ADMIN_PASSWORD_RESET_EMAIL_MAX ?? env?.ADMIN_RESET_EMAIL_MAX,
+      RATE_LIMIT_POLICIES.adminPasswordResetEmail.maxRequests
+    ),
+    tokenMax: parsePositiveInt(
+      env?.ADMIN_PASSWORD_RESET_TOKEN_MAX ?? env?.ADMIN_RESET_TOKEN_MAX,
+      RATE_LIMIT_POLICIES.adminPasswordResetToken.maxRequests
+    ),
+  };
+}
+
+function resolveEffectivePolicy(policyName, env) {
+  const base = RATE_LIMIT_POLICIES[policyName] || RATE_LIMIT_POLICIES.generalApi;
+  if (
+    policyName === 'adminPasswordReset' ||
+    policyName === 'adminPasswordResetEmail' ||
+    policyName === 'adminPasswordResetToken'
+  ) {
+    const cfg = getAdminResetRateLimitConfig(env);
+    const maxRequests =
+      policyName === 'adminPasswordReset'
+        ? cfg.ipMax
+        : policyName === 'adminPasswordResetEmail'
+        ? cfg.emailMax
+        : cfg.tokenMax;
+    return {
+      ...base,
+      windowMs: cfg.windowMs,
+      maxRequests,
+    };
+  }
+  return base;
+}
+
+function getRateLimitHmacSecret(env = {}) {
+  const dedicated =
+    typeof env?.RATE_LIMIT_HMAC_SECRET === 'string' ? env.RATE_LIMIT_HMAC_SECRET.trim() : '';
+  if (dedicated.length >= 16) return dedicated;
+  return getJwtSecret(env);
+}
+
+export async function buildRateLimitIdentifierHmac(domain, value, env = {}) {
+  const secret = getRateLimitHmacSecret(env);
+  return hmacSha256Hex(`${domain}:${String(value || '')}`, secret);
+}
+
 export function getClientIp(request, env = null) {
   const cfIp = request.headers.get('CF-Connecting-IP')?.trim();
   if (cfIp) return cfIp;
 
-  const isProd = String(env?.ENVIRONMENT || '').toLowerCase() === 'production';
-  if (isProd) {
+  if (isProductionEnv(env)) {
     // Never trust client-supplied X-Forwarded-For ahead of Cloudflare headers in production
     return request.headers.get('X-Real-IP')?.trim() || '0.0.0.0';
   }
@@ -109,23 +197,52 @@ function buildRateLimitResponse(policy, resetSeconds) {
   };
 }
 
+function buildRateLimiterUnavailableResponse() {
+  return {
+    allowed: false,
+    response: errorResponse(
+      'Administrator password recovery rate limiting is temporarily unavailable. Please try again shortly.',
+      503,
+      'RATE_LIMITER_UNAVAILABLE'
+    ),
+  };
+}
+
 export async function checkRateLimit(
   request,
   policyName = 'generalApi',
   env = null,
-  customKeySuffix = ''
+  customKeySuffix = '',
+  options = {}
 ) {
-  const policy = RATE_LIMIT_POLICIES[policyName] || RATE_LIMIT_POLICIES.generalApi;
-  const ip = getClientIp(request, env);
-  const key = `${policyName}:${ip}${customKeySuffix ? `:${customKeySuffix}` : ''}`;
+  const policy = resolveEffectivePolicy(policyName, env);
+  const includeIp = options?.includeIp !== false;
+  const failClosed = Boolean(policy.failClosedInProd || options?.failClosed);
+  const ip = includeIp ? getClientIp(request, env) : '';
+  const key = includeIp
+    ? `${policyName}:${ip}${customKeySuffix ? `:${customKeySuffix}` : ''}`
+    : `${policyName}:${customKeySuffix || getClientIp(request, env)}`;
   const now = Date.now();
 
+  let nativeLimiterSucceeded = false;
+  let dbFailed = false;
+
   // 1. Optional Cloudflare Native Rate Limiting Binding
-  if (env?.RATE_LIMITER && typeof env.RATE_LIMITER.limit === 'function') {
-    const outcome = await env.RATE_LIMITER.limit({ key });
-    if (outcome && outcome.success === false) {
-      const resetSeconds = Math.ceil(policy.windowMs / 1000);
-      return buildRateLimitResponse(policy, resetSeconds);
+  const nativeBinding =
+    policy.nativeBinding === 'ADMIN_RESET_RATE_LIMITER'
+      ? env?.ADMIN_RESET_RATE_LIMITER || env?.RATE_LIMITER
+      : env?.RATE_LIMITER;
+
+  if (nativeBinding && typeof nativeBinding.limit === 'function') {
+    try {
+      const outcome = await nativeBinding.limit({ key });
+      if (outcome && outcome.success === false) {
+        const resetSeconds = Math.ceil(policy.windowMs / 1000);
+        return buildRateLimitResponse(policy, resetSeconds);
+      }
+      nativeLimiterSucceeded = true;
+    } catch (err) {
+      console.error('[DTKS RateLimiter Warning]: Native rate limiter binding error:', err?.message || err);
     }
   }
 
@@ -181,12 +298,19 @@ export async function checkRateLimit(
           'X-RateLimit-Remaining': String(remaining),
         },
       };
-    } catch {
-      // Fall through to in-memory limiter if D1 is temporarily unavailable
+    } catch (err) {
+      dbFailed = true;
+      console.error('[DTKS RateLimiter Warning]: D1 rate_limits query error:', err?.message || err);
     }
   }
 
-  // 3. In-memory fallback
+  // Sensitive password-recovery endpoints must NEVER silently degrade to isolate-local
+  // in-memory rate limiting in production when shared distributed backing is unavailable.
+  if (failClosed && isProductionEnv(env) && (dbFailed || !nativeLimiterSucceeded)) {
+    return buildRateLimiterUnavailableResponse();
+  }
+
+  // 3. In-memory fallback (non-production or non-sensitive general routes only)
   let record = memoryBuckets.get(key);
   if (!record || now - record.windowStart >= policy.windowMs) {
     record = { windowStart: now, count: 0 };
@@ -217,6 +341,55 @@ export async function checkRateLimit(
       'X-RateLimit-Remaining': String(remaining),
     },
   };
+}
+
+/**
+ * Enforces layered Admin password-recovery protection:
+ *   - Per-IP limit (`adminPasswordReset`)
+ *   - Per-normalized-email HMAC limit on forgot-password (`adminPasswordResetEmail`)
+ *   - Per-token HMAC limit on reset-password (`adminPasswordResetToken`)
+ */
+export async function enforceAdminPasswordResetRateLimits(
+  request,
+  env,
+  { mode = 'forgot', body = null, skipIpCheck = false } = {}
+) {
+  if (!skipIpCheck) {
+    const ipCheck = await checkRateLimit(request, 'adminPasswordReset', env);
+    if (!ipCheck.allowed) return ipCheck;
+  }
+
+  if (mode === 'forgot' && body && typeof body.email === 'string') {
+    const normalizedEmail = body.email.trim().toLowerCase().slice(0, 254);
+    if (normalizedEmail) {
+      const emailHmac = await buildRateLimitIdentifierHmac('admin-reset-email', normalizedEmail, env);
+      const emailCheck = await checkRateLimit(
+        request,
+        'adminPasswordResetEmail',
+        env,
+        `em:${emailHmac}`,
+        { includeIp: false }
+      );
+      if (!emailCheck.allowed) return emailCheck;
+    }
+  }
+
+  if (mode === 'reset' && body && typeof body.token === 'string') {
+    const cleanToken = body.token.trim();
+    if (cleanToken) {
+      const tokenHmac = await buildRateLimitIdentifierHmac('admin-reset-token', cleanToken, env);
+      const tokenCheck = await checkRateLimit(
+        request,
+        'adminPasswordResetToken',
+        env,
+        `tok:${tokenHmac}`,
+        { includeIp: false }
+      );
+      if (!tokenCheck.allowed) return tokenCheck;
+    }
+  }
+
+  return { allowed: true };
 }
 
 export async function resetRateLimiter(env = null) {

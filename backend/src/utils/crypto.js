@@ -86,6 +86,16 @@ export async function sha256Hex(value) {
   return toHex(new Uint8Array(digest));
 }
 
+export async function hmacSha256Hex(value, secret) {
+  const keySecret = String(secret || '');
+  if (!keySecret) {
+    throw new Error('HMAC secret is required.');
+  }
+  const key = await importHmacKey(keySecret);
+  const sig = await crypto.subtle.sign('HMAC', key, encoder.encode(String(value)));
+  return toHex(new Uint8Array(sig));
+}
+
 async function derivePbkdf2Sha512Bytes(password, saltBytes, iterations = PBKDF2_DEFAULT_ITERATIONS) {
   const keyMaterial = await crypto.subtle.importKey(
     'raw',

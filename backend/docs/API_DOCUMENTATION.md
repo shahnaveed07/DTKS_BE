@@ -190,7 +190,7 @@ Revokes a single `refreshToken` (`allDevices: false`, `scope: "single_device"`) 
 - **Behavior:** Validates single-use SHA-256-hashed invitation token (48h expiry), hashes strong password, sets `is_active = 1` and `invite_accepted_at`, marks token used, and logs `ADMIN_INVITE_ACCEPTED`.
 
 #### `POST /api/v1/auth/forgot-password`
-- **Auth Required:** Public (Rate-limited: 8 req / 15 min per IP via `adminPasswordReset`)
+- **Auth Required:** Public (Layered Rate Limiting: `8` req / `15m` per IP + `5` req / `15m` per HMAC-hashed normalized email across all IPs; configurable via `ADMIN_PASSWORD_RESET_*` env vars; fails closed with `503 RATE_LIMITER_UNAVAILABLE` in production if shared limiting is unavailable)
 - **Request Body:** `{ "email": "admin@dreamtechkashmirsolutions.studio" }`
 - **Response (`200 OK`):**
   ```json
@@ -202,12 +202,12 @@ Revokes a single `refreshToken` (`allDevices: false`, `scope: "single_device"`) 
   ```
 - **Security Behavior:**
   - Checks Resend configuration (`RESEND_API_KEY`) before database lookup (`503 EMAIL_PROVIDER_UNCONFIGURED` if unconfigured).
-  - Only active administrators who have completed initial account setup (`is_active = 1`, not pending invite) receive a 1-hour single-use SHA-256-hashed reset token stored in `admin_auth_tokens` (`purpose = 'password_reset'`) and emailed via Resend with link `${APP_URL}/admin/reset-password?token=<rawToken>`.
-  - Revokes any prior unused `password_reset` tokens for the same admin.
-  - Returns the exact same `200 OK` payload for non-existent, inactive, and pending-invite emails (preventing account enumeration), and returns `503 EMAIL_DELIVERY_FAILED` if Resend fails for an eligible admin.
+  - Only active administrators who have completed initial account setup (`is_active = 1`, not pending invite) receive a 1-hour single-use SHA-256-hashed reset token stored in `admin_auth_tokens` (`purpose = 'password_reset'`) and emailed via Resend with fragment link `${APP_URL}/admin/reset-password#token=<rawToken>`.
+  - If email delivery succeeds, revokes prior unused `password_reset` tokens for the same admin.
+  - If Resend delivery fails, immediately revokes the newly generated token, leaves unrelated valid tokens untouched, records an internal `ADMIN_PASSWORD_RESET_DELIVERY_FAILED` audit event (`console.error` + `activity_logs` without raw tokens), and **still returns the exact same `200 OK` response** (zero account enumeration across active, non-existent, inactive, pending-invite, or failed-delivery states).
 
 #### `POST /api/v1/auth/reset-password`
-- **Auth Required:** Public (Rate-limited: 8 req / 15 min per IP via `adminPasswordReset`)
+- **Auth Required:** Public (Layered Rate Limiting: `8` req / `15m` per IP + `8` req / `15m` per HMAC-hashed submitted token across all IPs; configurable via `ADMIN_PASSWORD_RESET_*` env vars; fails closed with `503 RATE_LIMITER_UNAVAILABLE` in production if shared limiting is unavailable)
 - **Request Body:**
   ```json
   {
@@ -228,7 +228,7 @@ Revokes a single `refreshToken` (`allDevices: false`, `scope: "single_device"`) 
 - **Security Behavior:**
   - Validates strong password policy + matching `confirmPassword`, hashes token with SHA-256, and queries `admin_auth_tokens` exclusively (`client` tokens from `customer_auth_tokens` are rejected).
   - Rejects invalid (`400 INVALID_RESET_TOKEN`), expired (`400 RESET_TOKEN_EXPIRED`), previously used/revoked (`400 RESET_TOKEN_USED`), inactive (`403 ACCOUNT_DEACTIVATED`), or pending-invite (`403 INVITE_PENDING`) states.
-  - Atomically claims the token (`used_at`) to prevent concurrent double-consumption, updates `admins.password_hash` (`$pbkdf2-sha512$v=1$i=100000$...`), increments `admins.token_version` (immediately invalidating existing access JWTs), revokes all active `refresh_sessions`, logs `ADMIN_PASSWORD_RESET_COMPLETED`, and dispatches a non-blocking security alert email.
+  - Atomically claims the token inside D1 (`used_at IS NULL AND revoked_at IS NULL AND julianday(expires_at) > julianday(?)`) to enforce single-use and DB-level expiry under concurrency, updates `admins.password_hash` (`$pbkdf2-sha512$v=1$i=100000$...`), increments `admins.token_version` (immediately invalidating existing access JWTs), revokes all active `refresh_sessions`, logs `ADMIN_PASSWORD_RESET_COMPLETED`, and dispatches a non-blocking security alert email.
 
 ---
 

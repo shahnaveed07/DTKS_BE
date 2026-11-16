@@ -29,7 +29,7 @@ One client-side integration defect exists in the **separate frontend repo** (`DT
 | **Admin Auth** | `authService.js` | `PATCH /api/v1/auth/profile` | `{ name }` -> `{ admin }` | Aligned |
 | **Admin Auth** | `authService.js` | `POST /api/v1/auth/change-password` | `{ currentPassword, newPassword, confirmPassword? }` -> revokes prior sessions | Aligned |
 | **Admin Auth** | `AdminAcceptInvitePage.jsx` | `POST /api/v1/auth/accept-invite` | `{ token, password, confirmPassword }` -> `{ activated: true, account }` | Aligned |
-| **Admin Auth** | Admin Forgot Password page | `POST /api/v1/auth/forgot-password` | `{ email }` -> sends 1h single-use link (`/admin/reset-password?token=...`); uniform `200` anti-enumeration | Aligned |
+| **Admin Auth** | Admin Forgot Password page | `POST /api/v1/auth/forgot-password` | `{ email }` -> sends 1h single-use fragment link (`/admin/reset-password#token=...`); uniform `200` anti-enumeration | Aligned |
 | **Admin Auth** | Admin Reset Password page | `POST /api/v1/auth/reset-password` | `{ token, newPassword \| password, confirmPassword }` -> `{ reset: true }`; bumps `token_version` & revokes `refresh_sessions` | Aligned |
 | **Admin Accounts** | `authService.js` / `AdminAccountsPage.jsx` | `GET /api/v1/admin/accounts` | Supports `status=all\|active\|inactive\|pending\|expired`, `role`, `search`, `page`, `limit`; emits `invitePending`, `inviteExpiresAt`, `inviteExpired`, `activeSessions`, `activeSessionCount` | Aligned |
 | **Admin Accounts** | `authService.js` | `GET /api/v1/admin/accounts/:id` | Returns account details + `activeSessions`, `inviteExpiresAt`, `inviteExpired`, `recentSessions` | Aligned |

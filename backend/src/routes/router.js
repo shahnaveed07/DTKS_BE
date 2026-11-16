@@ -1,7 +1,7 @@
 import { API_PREFIX } from '../config/constants.js';
 import { isOriginAllowed } from '../config/cors.js';
 import { applySecurityAndCorsHeaders } from '../middleware/securityHeaders.js';
-import { checkRateLimit } from '../middleware/rateLimiter.js';
+import { checkRateLimit, enforceAdminPasswordResetRateLimits } from '../middleware/rateLimiter.js';
 import { authenticateAdmin, authenticateClient } from '../middleware/authMiddleware.js';
 import { handleException, logServerError } from '../middleware/errorHandler.js';
 import { jsonResponse, successResponse, errorResponse, parseJsonBody } from '../utils/response.js';
@@ -257,6 +257,27 @@ export async function handleApiRequest(request, env) {
   }
 
   try {
+    const isAdminForgotPasswordRoute =
+      pathname === `${API_PREFIX}/auth/forgot-password` && method === 'POST';
+    const isAdminResetPasswordRoute =
+      pathname === `${API_PREFIX}/auth/reset-password` && method === 'POST';
+
+    if (isAdminForgotPasswordRoute || isAdminResetPasswordRoute) {
+      const ipRate = await checkRateLimit(request, 'adminPasswordReset', env);
+      if (!ipRate.allowed) {
+        return applySecurityAndCorsHeaders(ipRate.response, request, env);
+      }
+      const rateCheckBody = await parseJsonBody(request.clone());
+      const layeredRate = await enforceAdminPasswordResetRateLimits(request, env, {
+        mode: isAdminForgotPasswordRoute ? 'forgot' : 'reset',
+        body: rateCheckBody,
+        skipIpCheck: true,
+      });
+      if (!layeredRate.allowed) {
+        return applySecurityAndCorsHeaders(layeredRate.response, request, env);
+      }
+    }
+
     // Ensure database reference catalog is initialized idempotently without overwriting existing data
     await ensureDatabaseSeeded(env);
 
@@ -357,19 +378,11 @@ export async function handleApiRequest(request, env) {
     }
 
     if (pathname === `${API_PREFIX}/auth/forgot-password` && method === 'POST') {
-      const resetRate = await checkRateLimit(request, 'adminPasswordReset', env);
-      if (!resetRate.allowed) {
-        return applySecurityAndCorsHeaders(resetRate.response, request, env);
-      }
       response = await forgotAdminPassword(request, env);
       return applySecurityAndCorsHeaders(response, request, env);
     }
 
     if (pathname === `${API_PREFIX}/auth/reset-password` && method === 'POST') {
-      const resetRate = await checkRateLimit(request, 'adminPasswordReset', env);
-      if (!resetRate.allowed) {
-        return applySecurityAndCorsHeaders(resetRate.response, request, env);
-      }
       response = await resetAdminPassword(request, env);
       return applySecurityAndCorsHeaders(response, request, env);
     }

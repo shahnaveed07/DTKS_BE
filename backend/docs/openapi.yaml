@@ -385,13 +385,13 @@ paths:
                 email: { type: string, format: email }
       responses:
         '200':
-          description: Uniform confirmation returned when email provider is configured (no account enumeration across active, nonexistent, inactive, or pending-invite admins)
+          description: Uniform confirmation returned whenever the email provider is configured (no account enumeration across active, nonexistent, inactive, pending-invite, or failed-delivery states)
         '400':
           description: Invalid email format (`VALIDATION_ERROR`)
         '429':
-          description: Rate limit exceeded (`8` requests / `15` minutes per IP)
+          description: Rate limit exceeded (`8` requests / `15` minutes per IP or `5` requests / `15` minutes per normalized email HMAC)
         '503':
-          description: Email provider unconfigured (`EMAIL_PROVIDER_UNCONFIGURED`) or delivery failed (`EMAIL_DELIVERY_FAILED`)
+          description: Email provider unconfigured (`EMAIL_PROVIDER_UNCONFIGURED`) or production rate limiter unavailable (`RATE_LIMITER_UNAVAILABLE`)
   /auth/reset-password:
     post:
       summary: Reset Administrator Password with Single-Use Token (Public)
@@ -417,7 +417,9 @@ paths:
         '403':
           description: Administrator account is deactivated or still pending initial invitation acceptance
         '429':
-          description: Rate limit exceeded (`8` requests / `15` minutes per IP)
+          description: Rate limit exceeded (`8` requests / `15` minutes per IP or `8` attempts / `15` minutes per token HMAC)
+        '503':
+          description: Production distributed rate limiter unavailable (`RATE_LIMITER_UNAVAILABLE`)
   /admin/accounts:
     get:
       summary: List Admin Accounts (super_admin, admin)

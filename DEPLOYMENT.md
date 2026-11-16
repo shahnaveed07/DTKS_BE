@@ -50,7 +50,7 @@ npx wrangler secret put INITIAL_ADMIN_PASSWORD
 npx wrangler secret put RESEND_API_KEY
 ```
 
-> **Important:** Make sure the domain in `EMAIL_FROM_ADDRESS` (`notifications@dreamtechkashmirsolutions.studio`) is verified in your Resend account, and `APP_URL` is configured (`https://dreamtechkashmirsolutions.studio` in `wrangler.toml`) so verification, password reset, and admin invite links resolve to the correct frontend routes (`/verify-email?token=...`, `/reset-password?token=...`, `/admin/accept-invite?token=...`, `/admin/reset-password?token=...`).
+> **Important:** Make sure the domain in `EMAIL_FROM_ADDRESS` (`notifications@dreamtechkashmirsolutions.studio`) is verified in your Resend account, and `APP_URL` is configured (`https://dreamtechkashmirsolutions.studio` in `wrangler.toml`) so verification, password reset, and admin invite links resolve to the correct frontend routes (`/verify-email?token=...`, `/reset-password?token=...`, `/admin/accept-invite?token=...`, and fragment-based `/admin/reset-password#token=...`). Also verify `backend/wrangler.toml` includes the native `[[ratelimits]]` binding (`ADMIN_RESET_RATE_LIMITER`) and `ADMIN_PASSWORD_RESET_*` rate-limit variables.
 
 ---
 
@@ -59,8 +59,7 @@ npx wrangler secret put RESEND_API_KEY
 Before deploying to production, verify tests, TypeScript checks, and Wrangler dry-run locally:
 
 ```bash
-npm test && npm run build
-cd backend && npm test && npx wrangler deploy --dry-run
+cd backend && npm test && npx wrangler deploy --dry-run --env production
 ```
 
 Then deploy the updated Worker code to `dtks-be`:

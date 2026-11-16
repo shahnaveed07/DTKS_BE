@@ -554,53 +554,90 @@ export async function forgotAdminPassword(request, env) {
 
   if (isEligibleAdmin) {
     const now = new Date().toISOString();
+    const tokenId = generateRandomId('atok');
     const rawResetToken = generateRandomToken(32);
     const resetTokenHash = await sha256Hex(rawResetToken);
     const resetExpirySeconds = getAdminResetExpirySeconds(env);
     const expiresAt = new Date(Date.now() + resetExpirySeconds * 1000).toISOString();
 
-    await env.DB.batch([
-      env.DB.prepare(
+    await env.DB.prepare(
+      `INSERT INTO admin_auth_tokens
+       (id, admin_id, purpose, token_hash, expires_at, used_at, revoked_at, created_at)
+       VALUES (?, ?, 'password_reset', ?, ?, NULL, NULL, ?)`
+    )
+      .bind(tokenId, admin.id, resetTokenHash, expiresAt, now)
+      .run();
+
+    let emailResult = {
+      sent: false,
+      status: 'failed',
+      detailMessage: 'Unexpected error dispatching password reset email.',
+    };
+    try {
+      emailResult = await sendAdminPasswordResetEmail(env, {
+        adminId: admin.id,
+        email: admin.email,
+        name: admin.name,
+        resetToken: rawResetToken,
+        expiresMinutes: Math.max(1, Math.round(resetExpirySeconds / 60)),
+      });
+    } catch (err) {
+      emailResult = {
+        sent: false,
+        status: 'failed',
+        detailMessage: err?.message || 'Unexpected error dispatching password reset email.',
+      };
+    }
+
+    if (emailResult.sent) {
+      await env.DB.prepare(
         `UPDATE admin_auth_tokens
          SET revoked_at = ?
-         WHERE admin_id = ? AND purpose = 'password_reset' AND used_at IS NULL AND revoked_at IS NULL`
-      ).bind(now, admin.id),
-      env.DB.prepare(
-        `INSERT INTO admin_auth_tokens
-         (id, admin_id, purpose, token_hash, expires_at, used_at, revoked_at, created_at)
-         VALUES (?, ?, 'password_reset', ?, ?, NULL, NULL, ?)`
-      ).bind(generateRandomId('atok'), admin.id, resetTokenHash, expiresAt, now),
-    ]);
+         WHERE admin_id = ? AND purpose = 'password_reset' AND id != ? AND used_at IS NULL AND revoked_at IS NULL`
+      )
+        .bind(now, admin.id, tokenId)
+        .run();
 
-    const emailResult = await sendAdminPasswordResetEmail(env, {
-      adminId: admin.id,
-      email: admin.email,
-      name: admin.name,
-      resetToken: rawResetToken,
-      expiresMinutes: Math.max(1, Math.round(resetExpirySeconds / 60)),
-    });
+      await logAdminActivity(env, {
+        adminId: admin.id,
+        action: 'ADMIN_PASSWORD_RESET_REQUESTED',
+        entityType: 'Admin',
+        entityId: admin.id,
+        details: `Administrator password reset requested for ${admin.email}`,
+        request,
+      });
+    } else {
+      const revokedAt = new Date().toISOString();
+      await env.DB.prepare(
+        `UPDATE admin_auth_tokens
+         SET revoked_at = ?
+         WHERE id = ? AND purpose = 'password_reset' AND used_at IS NULL AND revoked_at IS NULL`
+      )
+        .bind(revokedAt, tokenId)
+        .run();
 
-    await logAdminActivity(env, {
-      adminId: admin.id,
-      action: 'ADMIN_PASSWORD_RESET_REQUESTED',
-      entityType: 'Admin',
-      entityId: admin.id,
-      details: `Administrator password reset requested for ${admin.email}`,
-      request,
-    });
-
-    if (!emailResult.sent) {
-      return errorResponse(
-        'Administrator password reset email could not be delivered right now. Please try again shortly.',
-        503,
-        emailResult.status === 'skipped_unconfigured'
-          ? 'EMAIL_PROVIDER_UNCONFIGURED'
-          : 'EMAIL_DELIVERY_FAILED',
-        {
-          resetEmailSent: false,
+      console.error(
+        '[DTKS Security Event]: Admin password reset email delivery failed; token revoked.',
+        JSON.stringify({
+          adminId: admin.id,
+          tokenId,
           deliveryStatus: emailResult.status,
-        }
+          note: emailResult.detailMessage,
+        })
       );
+
+      await logAdminActivity(env, {
+        adminId: admin.id,
+        action: 'ADMIN_PASSWORD_RESET_DELIVERY_FAILED',
+        entityType: 'Admin',
+        entityId: admin.id,
+        details: JSON.stringify({
+          tokenId,
+          deliveryStatus: emailResult.status,
+          note: emailResult.detailMessage,
+        }),
+        request,
+      });
     }
   }
 
@@ -683,16 +720,34 @@ export async function resetAdminPassword(request, env) {
   const newHash = await hashPassword(password);
   const now = new Date().toISOString();
 
-  // Atomically claim the single-use token so concurrent requests cannot double-reset
+  // Atomically claim the single-use, unrevoked, unexpired token inside the DB update itself
   const claimRes = await env.DB.prepare(
     `UPDATE admin_auth_tokens
      SET used_at = ?
-     WHERE id = ? AND purpose = 'password_reset' AND used_at IS NULL AND revoked_at IS NULL`
+     WHERE id = ?
+       AND purpose = 'password_reset'
+       AND used_at IS NULL
+       AND revoked_at IS NULL
+       AND julianday(expires_at) > julianday(?)`
   )
-    .bind(now, tokenRow.id)
+    .bind(now, tokenRow.id, now)
     .run();
 
   if (Number(claimRes?.meta?.changes || 0) !== 1) {
+    const freshToken = await env.DB.prepare(
+      'SELECT used_at, revoked_at, expires_at FROM admin_auth_tokens WHERE id = ?'
+    )
+      .bind(tokenRow.id)
+      .first();
+
+    if (freshToken && !freshToken.used_at && !freshToken.revoked_at) {
+      return errorResponse(
+        'This password reset token has expired. Please request a new password reset.',
+        400,
+        'RESET_TOKEN_EXPIRED'
+      );
+    }
+
     return errorResponse(
       'This password reset token has already been used or revoked.',
       400,
