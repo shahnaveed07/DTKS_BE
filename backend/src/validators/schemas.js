@@ -485,6 +485,26 @@ export function validateOrderTrackInput(body = {}) {
   };
 }
 
+export function validateOrderTrackingResendInput(body = {}) {
+  const errors = {};
+  const rawOrderNumber = body.orderNumber ?? body.order_number ?? body.referenceId ?? body.ref;
+  const orderNumber = sanitizeText(rawOrderNumber, 64).trim().toUpperCase();
+  const email = normalizeEmail(body.email ?? body.customerEmail ?? body.customer_email);
+
+  if (!orderNumber || orderNumber.length < 4 || !/^[A-Z0-9_-]+$/.test(orderNumber)) {
+    errors.orderNumber = 'A valid order number is required.';
+  }
+  if (!isValidEmail(email)) {
+    errors.email = 'A valid email address is required.';
+  }
+
+  return {
+    isValid: Object.keys(errors).length === 0,
+    errors,
+    data: { orderNumber, email },
+  };
+}
+
 export function validateForgotPasswordInput(body = {}) {
   const errors = {};
   const email = normalizeEmail(body.email);

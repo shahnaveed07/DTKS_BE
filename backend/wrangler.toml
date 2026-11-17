@@ -1,7 +1,7 @@
 name = "dtks-be"
 main = "src/index.js"
 compatibility_date = "2025-02-01"
-workers_dev = true
+workers_dev = false
 
 # ==============================================================================
 # Custom Domain & Route Configuration for DTKS Production Backend API (`dtks-be`)
@@ -64,7 +64,7 @@ period = 60
 # target the exact same `dtks-be` Worker, D1 database, and R2 bucket.
 [env.production]
 name = "dtks-be"
-workers_dev = true
+workers_dev = false
 routes = [
   { pattern = "api.dreamtechkashmirsolutions.studio/*", zone_name = "dreamtechkashmirsolutions.studio" },
   { pattern = "dreamtechkashmirsolutions.studio/api/v1/*", zone_name = "dreamtechkashmirsolutions.studio" },

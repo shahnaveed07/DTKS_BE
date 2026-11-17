@@ -125,6 +125,26 @@ export const RATE_LIMIT_POLICIES = {
     failClosedInProd: true,
     message: 'Too many tracking requests for this order token. Please wait 15 minutes before trying again.',
   },
+  orderTrackingResend: {
+    windowMs: 15 * 60 * 1000, // 15 minutes
+    maxRequests: 8,
+    failClosedInProd: true,
+    message: 'Too many tracking link resend requests. Please wait 15 minutes before trying again.',
+  },
+  orderTrackingResendEmail: {
+    windowMs: 15 * 60 * 1000, // 15 minutes
+    maxRequests: 5,
+    failClosedInProd: true,
+    message:
+      'Too many tracking link resend requests for this email address. Please wait 15 minutes before trying again.',
+  },
+  orderTrackingResendOrder: {
+    windowMs: 15 * 60 * 1000, // 15 minutes
+    maxRequests: 5,
+    failClosedInProd: true,
+    message:
+      'Too many tracking link resend requests for this order number. Please wait 15 minutes before trying again.',
+  },
   publicSubmission: {
     windowMs: 10 * 60 * 1000, // 10 minutes
     maxRequests: 15,
@@ -583,6 +603,60 @@ export async function enforceOrderTrackingRateLimits(
         { includeIp: false }
       );
       if (!tokenCheck.allowed) return tokenCheck;
+    }
+  }
+
+  return { allowed: true };
+}
+
+export async function enforceOrderTrackingResendRateLimits(
+  request,
+  env,
+  { body = null, skipIpCheck = false } = {}
+) {
+  if (!skipIpCheck) {
+    const ipCheck = await checkRateLimit(request, 'orderTrackingResend', env);
+    if (!ipCheck.allowed) return ipCheck;
+  }
+
+  const rawEmail = body?.email ?? body?.customerEmail ?? body?.customer_email;
+  if (typeof rawEmail === 'string') {
+    const normalizedEmail = rawEmail.trim().toLowerCase().slice(0, 254);
+    if (normalizedEmail) {
+      const emailHmac = await buildRateLimitIdentifierHmac(
+        'order-track-resend-email',
+        normalizedEmail,
+        env
+      );
+      const emailCheck = await checkRateLimit(
+        request,
+        'orderTrackingResendEmail',
+        env,
+        `em:${emailHmac}`,
+        { includeIp: false }
+      );
+      if (!emailCheck.allowed) return emailCheck;
+    }
+  }
+
+  const rawOrderNumber =
+    body?.orderNumber ?? body?.order_number ?? body?.referenceId ?? body?.ref;
+  if (typeof rawOrderNumber === 'string') {
+    const normalizedOrder = rawOrderNumber.trim().toUpperCase().slice(0, 64);
+    if (normalizedOrder) {
+      const orderHmac = await buildRateLimitIdentifierHmac(
+        'order-track-resend-order',
+        normalizedOrder,
+        env
+      );
+      const orderCheck = await checkRateLimit(
+        request,
+        'orderTrackingResendOrder',
+        env,
+        `ord:${orderHmac}`,
+        { includeIp: false }
+      );
+      if (!orderCheck.allowed) return orderCheck;
     }
   }
 

@@ -7,6 +7,7 @@ import workerApp from '../src/index.js';
 import { createNodeWorkerEnv } from '../src/database/d1Adapter.js';
 import { resetRateLimiter } from '../src/middleware/rateLimiter.js';
 import { ensureDatabaseSeeded } from '../src/database/seed.js';
+import { notifyOrderCreated } from '../src/services/emailService.js';
 import { hashPassword, sha256Hex, signJwt, verifyJwt } from '../src/utils/crypto.js';
 import {
   ADMIN_ACCESS_COOKIE_NAME,
@@ -93,7 +94,7 @@ describe('DTKS Master Security Remediation Verification Suite (/api/v1)', () => 
   let r2Dir;
   let env;
   let capturedEmails = [];
-  let emailMode = 'ok'; // 'ok' | 'fail_all' | 'fail_security_only'
+  let emailMode = 'ok'; // 'ok' | 'fail_all' | 'fail_security_only' | 'fail_admin_only' | 'fail_customer_only'
   let adminBearer = '';
 
   before(async () => {
@@ -103,8 +104,28 @@ describe('DTKS Master Security Remediation Verification Suite (/api/v1)', () => 
 
     const mockEmailFetch = async (_url, init) => {
       const payload = JSON.parse(init.body);
+      const recipients = Array.isArray(payload.to) ? payload.to : [];
       if (emailMode === 'fail_all') {
-        return new Response(JSON.stringify({ message: 'Upstream Resend error' }), {
+        return new Response(JSON.stringify({ message: 'Upstream Resend error secret-detail' }), {
+          status: 502,
+          headers: { 'Content-Type': 'application/json' },
+        });
+      }
+      if (
+        emailMode === 'fail_admin_only' &&
+        (String(payload.subject || '').includes('[DTKS Admin]') ||
+          recipients.includes('contact@dreamtechkashmirsolutions.studio'))
+      ) {
+        return new Response(JSON.stringify({ message: 'Admin notification mailbox rejected' }), {
+          status: 502,
+          headers: { 'Content-Type': 'application/json' },
+        });
+      }
+      if (
+        emailMode === 'fail_customer_only' &&
+        !String(payload.subject || '').includes('[DTKS Admin]')
+      ) {
+        return new Response(JSON.stringify({ message: 'Customer Resend provider timeout' }), {
           status: 502,
           headers: { 'Content-Type': 'application/json' },
         });
@@ -311,19 +332,23 @@ describe('DTKS Master Security Remediation Verification Suite (/api/v1)', () => 
       },
     });
     assert.equal(postGuestOrder.status, 201);
-    const trackingToken = postGuestOrder.json.data.trackingToken;
-    assert.ok(trackingToken && trackingToken.length >= 64);
+    assert.equal(postGuestOrder.json.data.trackingToken, undefined);
+    assert.equal(postGuestOrder.json.data.tracking_token, undefined);
     assert.equal(postGuestOrder.json.data.order.customer_id, null);
+    assert.equal(postGuestOrder.json.data.trackingEmailSent, true);
 
     // Victim's portal MUST NOT include unauthenticated guest order
     const victimOrders = await apiRequest('/api/v1/client/orders', { token: victimToken });
     assert.equal(victimOrders.status, 200);
     assert.equal(victimOrders.json.data.orders.length, 0);
 
-    // Tracking token email uses #token= fragment (and never ?ref=&email=)
+    // Tracking token email uses #token= fragment (and never ?ref=&email= or API JSON leakage)
     const orderEmail = extractLatestEmail(clientEmail);
+    const trackingToken = extractFragmentToken(orderEmail);
+    assert.ok(trackingToken && trackingToken.length >= 64);
     assert.ok(orderEmail.text.includes(`/track-order#token=${trackingToken}`));
     assert.equal(orderEmail.text.includes('?ref='), false);
+    assert.equal(JSON.stringify(postGuestOrder.json).includes(trackingToken), false);
 
     // Valid POST /api/v1/orders/track returns non-PII summary
     const trackOk = await apiRequest('/api/v1/orders/track', {
@@ -900,5 +925,493 @@ describe('DTKS Master Security Remediation Verification Suite (/api/v1)', () => 
     assert.ok(
       (prodHttpsRes.headers.get('Strict-Transport-Security') || '').includes('max-age=31536000')
     );
+  });
+
+  it('6. Order Email Delivery Independence, Non-Blocking Resend Failures & Zero Secret Leakage', async () => {
+    const custEmail = 'delivery.resilience@dtks-test.studio';
+
+    // 6A. Admin failure must NOT block customer tracking email
+    emailMode = 'fail_admin_only';
+    const adminFailResult = await notifyOrderCreated(
+      env,
+      {
+        id: 'ord-unit-test-1',
+        orderNumber: 'DKS-2026-9901',
+        customerName: 'Delivery Test',
+        customerEmail: custEmail,
+        customerPhone: '+91 99061 60001',
+        service: 'Business Websites',
+        packageTitle: 'Starter',
+        status: 'Pending',
+        budget: '₹20,000',
+        projectDescription: 'Unit test independent dispatch',
+      },
+      { trackingToken: 'f'.repeat(64) }
+    );
+    emailMode = 'ok';
+    assert.equal(adminFailResult.customer.sent, true);
+    assert.equal(adminFailResult.customer.status, 'sent');
+    assert.equal(adminFailResult.admin.sent, false);
+    assert.equal(adminFailResult.admin.status, 'failed');
+
+    // 6B. Customer failure must NOT block admin email OR roll back order creation
+    emailMode = 'fail_customer_only';
+    const orderOnCustFail = await apiRequest('/api/v1/orders', {
+      method: 'POST',
+      ip: '198.51.100.80',
+      body: {
+        project_name: 'Order Survives Email Outage',
+        project_description: 'Customer email fails, order still persists and returns 201.',
+        budget: '₹25,000',
+        customer_name: 'Resilient Client',
+        customer_email: 'resilient.cust@dtks-test.studio',
+        customer_phone: '+91 99061 60002',
+      },
+    });
+    emailMode = 'ok';
+    assert.equal(orderOnCustFail.status, 201);
+    assert.equal(orderOnCustFail.json.data.trackingToken, undefined);
+    assert.equal(orderOnCustFail.json.data.trackingEmailSent, false);
+    const bodyStr = JSON.stringify(orderOnCustFail.json);
+    assert.equal(bodyStr.includes('Customer Resend provider timeout'), false);
+    assert.equal(bodyStr.includes('contact@dreamtechkashmirsolutions.studio'), false);
+
+    // Order exists in DB even though customer email failed
+    const dbOrder = await env.DB.prepare('SELECT id FROM orders WHERE id = ?')
+      .bind(orderOnCustFail.json.data.order.id)
+      .first();
+    assert.ok(dbOrder);
+
+    // 6C. Unconfigured RESEND_API_KEY reports skipped_unconfigured without throwing or rolling back order
+    const unconfiguredEnv = { ...env, RESEND_API_KEY: '' };
+    const unconfiguredOrder = await apiRequest('/api/v1/orders', {
+      method: 'POST',
+      ip: '198.51.100.81',
+      customEnv: unconfiguredEnv,
+      body: {
+        project_name: 'Order Unconfigured Email',
+        project_description: 'Resend API key absent; order still commits safely.',
+        budget: '₹25,000',
+        customer_name: 'Unconfigured Client',
+        customer_email: 'unconf.cust@dtks-test.studio',
+        customer_phone: '+91 99061 60003',
+      },
+    });
+    assert.equal(unconfiguredOrder.status, 201);
+    assert.equal(unconfiguredOrder.json.data.trackingEmailSent, false);
+
+    // Verify no raw tracking token was ever written to activity_logs
+    const logs = await env.DB.prepare('SELECT details FROM activity_logs').all();
+    for (const row of logs.results || []) {
+      assert.equal(String(row.details || '').includes('#token='), false);
+      assert.equal(String(row.details || '').includes('f'.repeat(64)), false);
+    }
+  });
+
+  it('7. Secure Tracking-Link Resend (POST /api/v1/orders/track/resend): Token Rotation, Delivery Failure Preservation, Concurrency & Layered Rate Limits', async () => {
+    const custEmail = 'track.resend@dtks-test.studio';
+    const orderRes = await apiRequest('/api/v1/orders', {
+      method: 'POST',
+      ip: '198.51.100.90',
+      body: {
+        project_name: 'Resend Tracking Target',
+        project_description: 'Testing secure tracking link resend and rotation lifecycle.',
+        budget: '₹40,000',
+        customer_name: 'Resend Client',
+        customer_email: custEmail,
+        customer_phone: '+91 99061 70001',
+      },
+    });
+    assert.equal(orderRes.status, 201);
+    const orderId = orderRes.json.data.order.id;
+    const orderNumber = orderRes.json.data.order.order_number;
+    const token1 = extractFragmentToken(extractLatestEmail(custEmail));
+
+    // 7A. Non-matching email returns uniform 200 without sending email or revoking token1
+    const emailCountBefore = capturedEmails.length;
+    const wrongEmailRes = await apiRequest('/api/v1/orders/track/resend', {
+      method: 'POST',
+      ip: '198.51.100.91',
+      body: { orderNumber, email: 'attacker.other@dtks-test.studio' },
+    });
+    assert.equal(wrongEmailRes.status, 200);
+    assert.deepEqual(wrongEmailRes.json.data, { requested: true });
+    assert.equal(capturedEmails.length, emailCountBefore);
+
+    // Non-existent order number returns identical uniform 200
+    const missingOrderRes = await apiRequest('/api/v1/orders/track/resend', {
+      method: 'POST',
+      ip: '198.51.100.92',
+      body: { orderNumber: 'DKS-2099-9999', email: custEmail },
+    });
+    assert.equal(missingOrderRes.status, 200);
+    assert.deepEqual(missingOrderRes.json.data, { requested: true });
+    assert.equal(capturedEmails.length, emailCountBefore);
+
+    // 7B. Delivery failure revokes ONLY newly generated token and preserves token1
+    emailMode = 'fail_all';
+    const failResend = await apiRequest('/api/v1/orders/track/resend', {
+      method: 'POST',
+      ip: '198.51.100.93',
+      body: { orderNumber, email: custEmail },
+    });
+    emailMode = 'ok';
+    assert.equal(failResend.status, 200);
+    assert.deepEqual(failResend.json.data, { requested: true });
+
+    const trackWithToken1AfterFail = await apiRequest('/api/v1/orders/track', {
+      method: 'POST',
+      ip: '198.51.100.94',
+      body: { token: token1 },
+    });
+    assert.equal(
+      trackWithToken1AfterFail.status,
+      200,
+      'Prior valid tracking token must remain active when resend email fails'
+    );
+
+    // 7C. Successful resend (case-insensitive orderNumber & email) issues token2 via #token= and revokes token1
+    const okResend = await apiRequest('/api/v1/orders/track/resend', {
+      method: 'POST',
+      ip: '198.51.100.95',
+      body: { order_number: orderNumber.toLowerCase(), email: custEmail.toUpperCase() },
+    });
+    assert.equal(okResend.status, 200);
+    assert.deepEqual(okResend.json.data, { requested: true });
+    assert.equal(okResend.json.data.trackingToken, undefined);
+
+    const resendEmailPayload = extractLatestEmail(custEmail);
+    assert.ok(resendEmailPayload.text.includes('/track-order#token='));
+    assert.equal(resendEmailPayload.text.includes('?token='), false);
+    const token2 = extractFragmentToken(resendEmailPayload);
+    assert.notEqual(token2, token1);
+    assert.equal(JSON.stringify(okResend.json).includes(token2), false);
+
+    const trackToken1Revoked = await apiRequest('/api/v1/orders/track', {
+      method: 'POST',
+      ip: '198.51.100.96',
+      body: { token: token1 },
+    });
+    assert.equal(trackToken1Revoked.status, 404);
+    assert.equal(trackToken1Revoked.json.error.code, 'ORDER_NOT_FOUND');
+
+    const trackToken2Valid = await apiRequest('/api/v1/orders/track', {
+      method: 'POST',
+      ip: '198.51.100.97',
+      body: { token: token2 },
+    });
+    assert.equal(trackToken2Valid.status, 200);
+    assert.equal(trackToken2Valid.json.data.order.order_number, orderNumber);
+
+    // 7D. Concurrent resend safety: parallel requests never leave zero valid tokens
+    const concurrentOrder = await apiRequest('/api/v1/orders', {
+      method: 'POST',
+      ip: '198.51.100.98',
+      body: {
+        project_name: 'Concurrent Resend Order',
+        project_description: 'Testing parallel resend requests.',
+        budget: '₹30,000',
+        customer_name: 'Concurrent User',
+        customer_email: 'concurrent.resend@dtks-test.studio',
+        customer_phone: '+91 99061 70002',
+      },
+    });
+    const concOrderId = concurrentOrder.json.data.order.id;
+    const concOrderNum = concurrentOrder.json.data.order.order_number;
+
+    const [c1, c2] = await Promise.all([
+      apiRequest('/api/v1/orders/track/resend', {
+        method: 'POST',
+        ip: '198.51.100.99',
+        body: { orderNumber: concOrderNum, email: 'concurrent.resend@dtks-test.studio' },
+      }),
+      apiRequest('/api/v1/orders/track/resend', {
+        method: 'POST',
+        ip: '198.51.100.100',
+        body: { orderNumber: concOrderNum, email: 'concurrent.resend@dtks-test.studio' },
+      }),
+    ]);
+    assert.equal(c1.status, 200);
+    assert.equal(c2.status, 200);
+    const activeTokensAfterConcurrent = await env.DB.prepare(
+      'SELECT COUNT(*) AS cnt FROM order_tracking_tokens WHERE order_id = ? AND revoked_at IS NULL'
+    )
+      .bind(concOrderId)
+      .first();
+    assert.ok(Number(activeTokensAfterConcurrent.cnt) >= 1);
+
+    // 7E. Layered HMAC rate limiting across rotating IPs + zero raw PII in rate_limits + prod fail-closed
+    const rlOrderNum = 'DKS-2026-RL01';
+    const rlEmail = 'ratelimit.target@dtks-test.studio';
+    for (let i = 1; i <= 5; i++) {
+      const r = await apiRequest('/api/v1/orders/track/resend', {
+        method: 'POST',
+        ip: `198.51.101.${i}`,
+        body: { orderNumber: rlOrderNum, email: rlEmail },
+      });
+      assert.equal(r.status, 200);
+    }
+    const blockedResend = await apiRequest('/api/v1/orders/track/resend', {
+      method: 'POST',
+      ip: '198.51.101.99',
+      body: { orderNumber: rlOrderNum, email: rlEmail },
+    });
+    assert.equal(blockedResend.status, 429);
+    assert.equal(blockedResend.json.error.code, 'RATE_LIMIT_EXCEEDED');
+
+    const rateRows = await env.DB.prepare('SELECT rate_key FROM rate_limits').all();
+    for (const rr of rateRows.results || []) {
+      assert.equal(String(rr.rate_key).includes(rlEmail), false);
+      assert.equal(String(rr.rate_key).includes(rlOrderNum), false);
+    }
+
+    // Production plaintext HTTP blocked (403 HTTPS_REQUIRED) + D1 failure fails closed (503)
+    const prodEnv = { ...env, ENVIRONMENT: 'production' };
+    const httpResend = await apiRequest('/api/v1/orders/track/resend', {
+      method: 'POST',
+      urlBase: 'http://api.dreamtechkashmirsolutions.studio',
+      customEnv: prodEnv,
+      body: { orderNumber, email: custEmail },
+    });
+    assert.equal(httpResend.status, 403);
+    assert.equal(httpResend.json.error.code, 'HTTPS_REQUIRED');
+
+    const brokenRateDb = {
+      prepare(sql) {
+        return {
+          bind() {
+            return this;
+          },
+          async first() {
+            if (/rate_limits/i.test(sql)) throw new Error('D1 rate limit down');
+            return { cnt: 1 };
+          },
+          async run() {
+            if (/rate_limits/i.test(sql)) throw new Error('D1 rate limit down');
+            return { success: true };
+          },
+          async all() {
+            if (/rate_limits/i.test(sql)) throw new Error('D1 rate limit down');
+            return { results: [] };
+          },
+        };
+      },
+    };
+    const prodBrokenEnv = { ...env, ENVIRONMENT: 'production', DB: brokenRateDb };
+    await ensureDatabaseSeeded(prodBrokenEnv);
+    const failClosedResend = await apiRequest('/api/v1/orders/track/resend', {
+      method: 'POST',
+      ip: '198.51.101.200',
+      customEnv: prodBrokenEnv,
+      body: { orderNumber, email: custEmail },
+    });
+    assert.equal(failClosedResend.status, 503);
+    assert.equal(failClosedResend.json.error.code, 'RATE_LIMITER_UNAVAILABLE');
+  });
+
+  it('8. Public Tracking Strips Internal Admin & Status-History Notes While Preserving Admin Visibility', async () => {
+    const custEmail = 'notes.privacy@dtks-test.studio';
+    const orderRes = await apiRequest('/api/v1/orders', {
+      method: 'POST',
+      ip: '198.51.102.10',
+      body: {
+        project_name: 'Private Notes Isolation Test',
+        project_description: 'Verify internal notes never leak through public tracking.',
+        budget: '₹50,000',
+        customer_name: 'Privacy Client',
+        customer_email: custEmail,
+        customer_phone: '+91 99061 80001',
+      },
+    });
+    assert.equal(orderRes.status, 201);
+    const orderId = orderRes.json.data.order.id;
+    const trackingToken = extractFragmentToken(extractLatestEmail(custEmail));
+
+    // Admin updates status with BOTH internal staff `notes` / `admin_notes` AND customer-facing `customer_update`
+    const statusUpdate = await apiRequest(`/api/v1/orders/${orderId}/status`, {
+      method: 'PATCH',
+      token: adminBearer,
+      body: {
+        status: 'InProgress',
+        notes: 'INTERNAL STAFF NOTE: Client requested urgent discount review',
+        admin_notes: 'TOP SECRET MARGIN INFO: 40% target margin',
+        customer_update: 'Your website build has entered active development.',
+      },
+    });
+    assert.equal(statusUpdate.status, 200);
+
+    // Public tracking sees customer_update and clean statusHistory WITHOUT notes/note/admin_notes
+    const publicTrack = await apiRequest('/api/v1/orders/track', {
+      method: 'POST',
+      ip: '198.51.102.11',
+      body: { token: trackingToken },
+    });
+    assert.equal(publicTrack.status, 200);
+    const trackedOrder = publicTrack.json.data.order;
+    assert.equal(
+      trackedOrder.customer_update,
+      'Your website build has entered active development.'
+    );
+    assert.equal(trackedOrder.admin_notes, undefined);
+    assert.equal(trackedOrder.adminNotes, undefined);
+    assert.equal(trackedOrder.internalNotes, undefined);
+    assert.ok(Array.isArray(trackedOrder.statusHistory) && trackedOrder.statusHistory.length >= 2);
+    for (const entry of trackedOrder.statusHistory) {
+      assert.equal(entry.notes, undefined);
+      assert.equal(entry.note, undefined);
+    }
+    const serialized = JSON.stringify(publicTrack.json);
+    assert.equal(serialized.includes('INTERNAL STAFF NOTE'), false);
+    assert.equal(serialized.includes('TOP SECRET MARGIN INFO'), false);
+
+    // Admin order detail endpoint MUST retain full internal notes
+    const adminDetail = await apiRequest(`/api/v1/orders/${orderId}`, {
+      token: adminBearer,
+    });
+    assert.equal(adminDetail.status, 200);
+    assert.equal(adminDetail.json.data.order.admin_notes, 'TOP SECRET MARGIN INFO: 40% target margin');
+    assert.ok(
+      adminDetail.json.data.order.statusHistory.some((h) =>
+        String(h.notes || '').includes('INTERNAL STAFF NOTE')
+      )
+    );
+  });
+
+  it('9. Client Auth Contract (Guest 401, Cookie Refresh with Missing/Expired Access Cookie, CSRF, Isolation) & Wrangler Config Verification', async () => {
+    // 9A. Guest GET /api/v1/client/auth/me stays 401 UNAUTHORIZED without setting cookies
+    const guestMe = await apiRequest('/api/v1/client/auth/me', { ip: '198.51.103.1' });
+    assert.equal(guestMe.status, 401);
+    assert.equal(guestMe.json.error.code, 'UNAUTHORIZED');
+    assert.equal(guestMe.setCookies.length, 0);
+
+    // Register, verify, and log in via cookies
+    const clientEmail = 'contract.client@dtks-test.studio';
+    await apiRequest('/api/v1/client/auth/register', {
+      method: 'POST',
+      ip: '198.51.103.2',
+      body: {
+        fullName: 'Contract Client',
+        email: clientEmail,
+        phone: '+91 99061 90001',
+        password: 'ContractClient#2026!Strong',
+        confirmPassword: 'ContractClient#2026!Strong',
+        acceptTerms: true,
+      },
+    });
+    const verifyTok = extractFragmentToken(extractLatestEmail(clientEmail));
+    await apiRequest('/api/v1/client/auth/verify-email', {
+      method: 'POST',
+      ip: '198.51.103.3',
+      body: { token: verifyTok },
+    });
+
+    const jar = new CookieJar();
+    const loginRes = await apiRequest('/api/v1/client/auth/login', {
+      method: 'POST',
+      ip: '198.51.103.4',
+      jar,
+      body: { email: clientEmail, password: 'ContractClient#2026!Strong' },
+    });
+    assert.equal(loginRes.status, 200);
+
+    // 9B. Cookie-only session restoration on GET /client/auth/me
+    const cookieMe = await apiRequest('/api/v1/client/auth/me', { jar, ip: '198.51.103.5' });
+    assert.equal(cookieMe.status, 200);
+    assert.equal(cookieMe.json.data.client.email, clientEmail);
+
+    // 9C. Cookie refresh when access cookie is absent OR expired + valid CSRF succeeds cleanly
+    const refreshOnlyJar = new CookieJar();
+    refreshOnlyJar.map.set(CLIENT_REFRESH_COOKIE_NAME, jar.get(CLIENT_REFRESH_COOKIE_NAME));
+    refreshOnlyJar.map.set(CLIENT_CSRF_COOKIE_NAME, jar.get(CLIENT_CSRF_COOKIE_NAME));
+
+    const refreshMissingCsrf = await apiRequest('/api/v1/client/auth/refresh', {
+      method: 'POST',
+      ip: '198.51.103.6',
+      jar: refreshOnlyJar,
+      body: {},
+    });
+    assert.equal(refreshMissingCsrf.status, 403);
+    assert.equal(refreshMissingCsrf.json.error.code, 'CSRF_VALIDATION_FAILED');
+
+    const refreshWithMissingAccessCookie = await apiRequest('/api/v1/client/auth/refresh', {
+      method: 'POST',
+      ip: '198.51.103.7',
+      jar: refreshOnlyJar,
+      headers: { 'X-CSRF-Token': jar.get(CLIENT_CSRF_COOKIE_NAME) },
+      body: {},
+    });
+    assert.equal(refreshWithMissingAccessCookie.status, 200);
+    assert.equal(refreshWithMissingAccessCookie.json.data.authMode, 'cookie');
+    assert.ok(refreshOnlyJar.get(CLIENT_ACCESS_COOKIE_NAME));
+
+    // Also test refresh when access cookie holds an expired JWT
+    const expiredAccessJwt = await signJwt(
+      {
+        sub: cookieMe.json.data.client.id,
+        accountType: 'client',
+        type: 'access',
+        tv: 1,
+      },
+      TEST_JWT_SECRET,
+      -60
+    );
+    refreshOnlyJar.map.set(CLIENT_ACCESS_COOKIE_NAME, expiredAccessJwt);
+    const refreshWithExpiredAccess = await apiRequest('/api/v1/client/auth/refresh', {
+      method: 'POST',
+      ip: '198.51.103.8',
+      jar: refreshOnlyJar,
+      headers: { 'X-CSRF-Token': refreshWithMissingAccessCookie.json.data.csrfToken },
+      body: {},
+    });
+    assert.equal(refreshWithExpiredAccess.status, 200);
+
+    // 9D. Missing / invalid refresh token status codes
+    const missingRefresh = await apiRequest('/api/v1/client/auth/refresh', {
+      method: 'POST',
+      ip: '198.51.103.9',
+      body: {},
+    });
+    assert.equal(missingRefresh.status, 400);
+    assert.equal(missingRefresh.json.error.code, 'MISSING_REFRESH_TOKEN');
+
+    const invalidRefresh = await apiRequest('/api/v1/client/auth/refresh', {
+      method: 'POST',
+      ip: '198.51.103.10',
+      headers: { 'X-Auth-Mode': 'bearer' },
+      body: { refreshToken: 'b'.repeat(64) },
+    });
+    assert.equal(invalidRefresh.status, 401);
+    assert.equal(invalidRefresh.json.error.code, 'INVALID_REFRESH_TOKEN');
+
+    // 9E. Admin JWT cannot access client endpoint, Client JWT cannot access admin endpoint
+    const adminToClient = await apiRequest('/api/v1/client/auth/me', {
+      token: adminBearer,
+      ip: '198.51.103.11',
+    });
+    assert.equal(adminToClient.status, 401);
+    assert.equal(adminToClient.json.error.code, 'INVALID_TOKEN_TYPE');
+
+    const clientBearerLogin = await apiRequest('/api/v1/client/auth/login', {
+      method: 'POST',
+      ip: '198.51.103.12',
+      headers: { 'X-Auth-Mode': 'bearer' },
+      body: { email: clientEmail, password: 'ContractClient#2026!Strong' },
+    });
+    const clientToAdmin = await apiRequest('/api/v1/auth/me', {
+      token: clientBearerLogin.json.data.accessToken,
+      ip: '198.51.103.13',
+    });
+    assert.equal(clientToAdmin.status, 401);
+    assert.equal(clientToAdmin.json.error.code, 'INVALID_TOKEN_TYPE');
+
+    // 9F. Verify wrangler.toml production config disables workers.dev while retaining custom routes
+    const wranglerToml = fs.readFileSync(
+      path.resolve(process.cwd(), process.cwd().endsWith('backend') ? 'wrangler.toml' : 'backend/wrangler.toml'),
+      'utf8'
+    );
+    assert.match(wranglerToml, /workers_dev\s*=\s*false/);
+    assert.equal(/workers_dev\s*=\s*true/.test(wranglerToml), false);
+    assert.ok(wranglerToml.includes('api.dreamtechkashmirsolutions.studio/*'));
+    assert.ok(wranglerToml.includes('dreamtechkashmirsolutions.studio/api/v1/*'));
   });
 });

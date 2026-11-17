@@ -710,19 +710,22 @@ paths:
       summary: Rotate Client Refresh Token
       tags: [Client Authentication]
       requestBody:
-        required: true
+        required: false
         content:
           application/json:
             schema:
               type: object
-              required: [refreshToken]
               properties:
                 refreshToken: { type: string }
       responses:
         '200':
-          description: New client token pair issued
+          description: New client token pair issued (via HttpOnly cookies by default, or JSON body with `X-Auth-Mode: bearer`)
+        '400':
+          description: Missing refresh token (`MISSING_REFRESH_TOKEN`)
         '401':
-          description: Invalid or expired refresh token
+          description: Invalid, expired, or replayed refresh token (`INVALID_REFRESH_TOKEN`, `REFRESH_TOKEN_EXPIRED`, `REFRESH_TOKEN_REPLAY_DETECTED`)
+        '403':
+          description: CSRF validation failed (`CSRF_VALIDATION_FAILED`), email not verified (`EMAIL_NOT_VERIFIED`), or account deactivated (`ACCOUNT_DEACTIVATED`)
   /client/auth/logout:
     post:
       summary: Client Logout & Single-Device or All-Devices Session Revocation
@@ -750,7 +753,9 @@ paths:
         '200':
           description: Current client profile
         '401':
-          description: Unauthorized or non-client token
+          description: Missing, expired, revoked, invalid, or non-client access token (`UNAUTHORIZED`, `TOKEN_EXPIRED`, `INVALID_TOKEN`, `SESSION_REVOKED`, `INVALID_TOKEN_TYPE`)
+        '403':
+          description: Email not verified (`EMAIL_NOT_VERIFIED`) or account deactivated (`ACCOUNT_DEACTIVATED`)
   /client/auth/profile:
     patch:
       summary: Update Current Client Profile
@@ -1296,11 +1301,12 @@ paths:
           description: Asset not found
   /orders:
     post:
-      summary: Submit Website Order Request (Public)
+      summary: Submit Website Order Request (Public or Authenticated Client)
+      description: Creates a website order, issues a hashed private tracking token delivered exclusively via `#token=` email (never returned in the API response), and dispatches independent customer/admin emails without blocking order persistence.
       tags: [Orders]
       responses:
         '201':
-          description: Order created with unique reference number
+          description: Order created (`{ order, trackingExpiresAt, trackingEmailSent }`; raw tracking token is omitted from JSON)
     get:
       summary: List & Filter Orders (Admin)
       tags: [Orders]
@@ -1312,6 +1318,7 @@ paths:
   /orders/track:
     post:
       summary: Track Order Status by Private SHA-256-Hashed Tracking Token (Public, Non-PII Summary)
+      description: Returns public order progress and `statusHistory` (`status`, `customer_update`, `created_at`) while omitting PII and internal admin `notes`.
       tags: [Orders]
       requestBody:
         required: true
@@ -1324,11 +1331,39 @@ paths:
                 token: { type: string, minLength: 32 }
       responses:
         '200':
-          description: Non-PII order status & history summary
+          description: Non-PII order status & customer-safe history summary
+        '403':
+          description: Plaintext HTTP rejected in production (`HTTPS_REQUIRED`)
         '404':
           description: Uniform not found for invalid, expired, or revoked tracking token (`ORDER_NOT_FOUND`)
         '429':
           description: Rate limit exceeded (`orderTracking` / `orderTrackingToken`)
+  /orders/track/resend:
+    post:
+      summary: Resend Private Order Tracking Link (Public, Uniform Anti-Enumeration)
+      description: Validates `orderNumber` and `email` together against stored orders, sends a fresh `#token=` tracking link strictly to the stored `customer_email`, and rotates prior tracking tokens only after confirmed email delivery. Always returns uniform `200 OK` `{ requested: true }` when input is syntactically valid and rate limits permit.
+      tags: [Orders]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [orderNumber, email]
+              properties:
+                orderNumber: { type: string, example: DKS-2026-0001 }
+                email: { type: string, format: email, example: tariq.ahmad@example.com }
+      responses:
+        '200':
+          description: Uniform acceptance response (`{ requested: true }`) without enumerating order/email existence or exposing provider errors
+        '400':
+          description: Missing or invalid `orderNumber` / `email` format (`VALIDATION_ERROR`)
+        '403':
+          description: Plaintext HTTP rejected in production (`HTTPS_REQUIRED`)
+        '429':
+          description: Rate limit exceeded (`orderTrackingResend` IP + HMAC email/order limits)
+        '503':
+          description: Distributed rate limiter unavailable in production (`RATE_LIMITER_UNAVAILABLE`)
   /orders/{id}:
     get:
       summary: Get Order Details & History (Admin)

@@ -300,6 +300,18 @@
           }
         },
         {
+          "name": "Resend Private Order Tracking Link (Public)",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "url": "{{baseUrl}}/orders/track/resend",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"orderNumber\": \"DKS-2026-0001\",\n  \"email\": \"tariq.ahmad@example.com\"\n}"
+            }
+          }
+        },
+        {
           "name": "List Orders (Admin)",
           "request": {
             "method": "GET",

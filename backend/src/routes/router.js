@@ -8,6 +8,7 @@ import {
   enforceClientRegisterRateLimits,
   enforceClientVerificationRateLimits,
   enforceOrderTrackingRateLimits,
+  enforceOrderTrackingResendRateLimits,
 } from '../middleware/rateLimiter.js';
 import { authenticateAdmin, authenticateClient, isHttpsRequest } from '../middleware/authMiddleware.js';
 import { handleException, logServerError } from '../middleware/errorHandler.js';
@@ -88,6 +89,7 @@ import {
 import {
   createOrder,
   trackCustomerOrder,
+  resendOrderTrackingLink,
   listOrders,
   getOrderById,
   updateOrderStatusOnly,
@@ -266,7 +268,7 @@ export async function handleApiRequest(request, env) {
     (pathname.startsWith(`${API_PREFIX}/auth`) ||
       pathname.startsWith(`${API_PREFIX}/client`) ||
       pathname.startsWith(`${API_PREFIX}/admin`) ||
-      pathname === `${API_PREFIX}/orders/track`)
+      pathname.startsWith(`${API_PREFIX}/orders/track`))
   ) {
     const insecureRes = errorResponse(
       'HTTPS is required in production for authentication, account, and tracking operations.',
@@ -844,6 +846,23 @@ export async function handleApiRequest(request, env) {
     // ========================================================================
     // 5. ORDERS ROUTES (/api/v1/orders/*)
     // ========================================================================
+    if (pathname === `${API_PREFIX}/orders/track/resend` && method === 'POST') {
+      const ipRate = await checkRateLimit(request, 'orderTrackingResend', env);
+      if (!ipRate.allowed) {
+        return applySecurityAndCorsHeaders(ipRate.response, request, env);
+      }
+      const resendBody = await parseJsonBody(request.clone());
+      const layeredResendRate = await enforceOrderTrackingResendRateLimits(request, env, {
+        body: resendBody,
+        skipIpCheck: true,
+      });
+      if (!layeredResendRate.allowed) {
+        return applySecurityAndCorsHeaders(layeredResendRate.response, request, env);
+      }
+      response = await resendOrderTrackingLink(request, env);
+      return applySecurityAndCorsHeaders(response, request, env);
+    }
+
     if (pathname === `${API_PREFIX}/orders/track`) {
       if (method === 'POST') {
         const ipRate = await checkRateLimit(request, 'orderTracking', env);

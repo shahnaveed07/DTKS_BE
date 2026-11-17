@@ -5,9 +5,14 @@ import {
   validateOrderSubmission,
   validateOrderStatus,
   validateOrderTrackInput,
+  validateOrderTrackingResendInput,
 } from '../validators/schemas.js';
 import { logAdminActivity } from '../services/auditService.js';
-import { notifyOrderCreated, notifyOrderStatusUpdated } from '../services/emailService.js';
+import {
+  notifyOrderCreated,
+  notifyOrderStatusUpdated,
+  sendOrderTrackingResendEmail,
+} from '../services/emailService.js';
 import { resolveOptionalClientAuth } from '../middleware/authMiddleware.js';
 
 export function mapOrderRow(row, { includeInternal = true } = {}) {
@@ -162,8 +167,6 @@ function mapTrackedOrderSummary(row, historyRows = []) {
       previousStatus: h.previous_status,
       new_status: h.new_status,
       newStatus: h.new_status,
-      notes: h.notes,
-      note: h.notes,
       created_at: h.created_at,
       createdAt: h.created_at,
       changedAt: h.created_at,
@@ -396,13 +399,15 @@ export async function createOrder(request, env) {
   const createdRow = await env.DB.prepare('SELECT * FROM orders WHERE id = ?').bind(orderId).first();
   const publicOrder = mapOrderRow(createdRow, { includeInternal: false });
 
-  await notifyOrderCreated(env, publicOrder, { trackingToken: rawTrackingToken });
+  const emailDelivery = await notifyOrderCreated(env, publicOrder, {
+    trackingToken: rawTrackingToken,
+  });
 
   return successResponse(
     {
       order: publicOrder,
-      trackingToken: rawTrackingToken,
       trackingExpiresAt,
+      trackingEmailSent: Boolean(emailDelivery?.customer?.sent),
     },
     'Website order submitted successfully.',
     201
@@ -450,13 +455,144 @@ export async function trackCustomerOrder(request, env) {
     .catch(() => {});
 
   const historyResult = await env.DB.prepare(
-    'SELECT id, previous_status, new_status, notes, created_at FROM order_status_history WHERE order_id = ? ORDER BY created_at ASC'
+    'SELECT id, previous_status, new_status, created_at FROM order_status_history WHERE order_id = ? ORDER BY created_at ASC'
   )
     .bind(row.id)
     .all();
 
   const order = mapTrackedOrderSummary(row, historyResult.results || []);
   return successResponse({ order }, 'Order tracking record retrieved.');
+}
+
+async function revokePriorTrackingTokens(db, orderId, priorTokenIds, revokedAt) {
+  if (!Array.isArray(priorTokenIds) || priorTokenIds.length === 0) return 0;
+  let revokedCount = 0;
+  const chunkSize = 50;
+  for (let i = 0; i < priorTokenIds.length; i += chunkSize) {
+    const chunk = priorTokenIds.slice(i, i + chunkSize);
+    const placeholders = chunk.map(() => '?').join(', ');
+    const res = await db
+      .prepare(
+        `UPDATE order_tracking_tokens
+         SET revoked_at = ?
+         WHERE order_id = ? AND revoked_at IS NULL AND id IN (${placeholders})`
+      )
+      .bind(revokedAt, orderId, ...chunk)
+      .run();
+    revokedCount += Number(res?.meta?.changes || 0);
+  }
+  return revokedCount;
+}
+
+export async function resendOrderTrackingLink(request, env) {
+  const body = await parseJsonBody(request);
+  const validation = validateOrderTrackingResendInput(body);
+  if (!validation.isValid) {
+    return errorResponse(
+      'Please provide a valid order number and email address.',
+      400,
+      'VALIDATION_ERROR',
+      validation.errors
+    );
+  }
+
+  const { orderNumber, email } = validation.data;
+  const order = await env.DB.prepare(
+    `SELECT id, order_number, customer_name, customer_email, service_name, package_title, status
+     FROM orders
+     WHERE lower(order_number) = lower(?) AND lower(customer_email) = lower(?)
+     LIMIT 1`
+  )
+    .bind(orderNumber, email)
+    .first();
+
+  if (order) {
+    const existingTokensResult = await env.DB.prepare(
+      `SELECT id FROM order_tracking_tokens
+       WHERE order_id = ? AND revoked_at IS NULL`
+    )
+      .bind(order.id)
+      .all();
+    const priorTokenIds = (existingTokensResult.results || []).map((t) => t.id);
+
+    const now = new Date().toISOString();
+    const tokenId = generateRandomId('otok');
+    const rawTrackingToken = generateRandomToken(32);
+    const tokenHash = await sha256Hex(rawTrackingToken);
+    const expiresAt = new Date(
+      Date.now() + ORDER_TRACKING_TOKEN_EXPIRY_SECONDS * 1000
+    ).toISOString();
+
+    await env.DB.prepare(
+      `INSERT INTO order_tracking_tokens
+       (id, order_id, token_hash, expires_at, revoked_at, created_at, last_accessed_at)
+       VALUES (?, ?, ?, ?, NULL, ?, NULL)`
+    )
+      .bind(tokenId, order.id, tokenHash, expiresAt, now)
+      .run();
+
+    const emailResult = await sendOrderTrackingResendEmail(env, {
+      orderId: order.id,
+      orderNumber: order.order_number,
+      customerName: order.customer_name,
+      customerEmail: order.customer_email,
+      serviceName: order.service_name,
+      packageTitle: order.package_title,
+      status: order.status,
+      trackingToken: rawTrackingToken,
+      expiresDays: Math.max(1, Math.round(ORDER_TRACKING_TOKEN_EXPIRY_SECONDS / 86400)),
+    });
+
+    if (emailResult?.sent) {
+      const revokedAt = new Date().toISOString();
+      const revokedPriorCount = await revokePriorTrackingTokens(
+        env.DB,
+        order.id,
+        priorTokenIds,
+        revokedAt
+      );
+
+      await logAdminActivity(env, {
+        adminId: null,
+        action: 'ORDER_TRACKING_LINK_RESENT',
+        entityType: 'Order',
+        entityId: order.id,
+        details: JSON.stringify({
+          orderNumber: order.order_number,
+          tokenId,
+          revokedPriorCount,
+        }),
+        request,
+      });
+    } else {
+      const revokedAt = new Date().toISOString();
+      await env.DB.prepare(
+        `UPDATE order_tracking_tokens
+         SET revoked_at = ?
+         WHERE id = ? AND revoked_at IS NULL`
+      )
+        .bind(revokedAt, tokenId)
+        .run();
+
+      await logAdminActivity(env, {
+        adminId: null,
+        action: 'ORDER_TRACKING_RESEND_DELIVERY_FAILED',
+        entityType: 'Order',
+        entityId: order.id,
+        details: JSON.stringify({
+          orderNumber: order.order_number,
+          tokenId,
+          deliveryStatus: emailResult?.status || 'failed',
+        }),
+        request,
+      });
+    }
+  }
+
+  return successResponse(
+    { requested: true },
+    'If the order details match our records, a tracking link will be sent to the registered email address.'
+  );
 }
 
 export async function listOrders(request, env) {

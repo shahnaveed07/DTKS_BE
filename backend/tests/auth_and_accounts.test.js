@@ -83,9 +83,14 @@ describe('DTKS Admin Account Management & Client Auth Test Suite (/api/v1)', () 
   });
 
   function extractTokenFromLatestEmail(recipientEmail) {
+    const normalizedRecipient = String(recipientEmail || '').trim().toLowerCase();
     const email = [...capturedEmails]
       .reverse()
-      .find((m) => Array.isArray(m.to) && m.to.includes(recipientEmail));
+      .find(
+        (m) =>
+          Array.isArray(m.to) &&
+          m.to.some((addr) => String(addr || '').trim().toLowerCase() === normalizedRecipient)
+      );
     assert.ok(email, `Expected email dispatched to ${recipientEmail}`);
     const match = /[?#]token=([a-f0-9]+)/i.exec(email.text || '');
     assert.ok(match && match[1], `Expected token link in email text to ${recipientEmail}`);
@@ -462,8 +467,9 @@ describe('DTKS Admin Account Management & Client Auth Test Suite (/api/v1)', () 
       },
     });
     assert.equal(guestOrderRes.status, 201);
+    assert.equal(guestOrderRes.json.data.trackingToken, undefined);
     const guestOrderId = guestOrderRes.json.data.order.id;
-    const guestTrackingToken = guestOrderRes.json.data.trackingToken;
+    const guestTrackingToken = extractTokenFromLatestEmail(guestEmail);
     assert.ok(guestTrackingToken && guestTrackingToken.length >= 64);
     assert.equal(guestOrderRes.json.data.order.status, 'Pending');
 

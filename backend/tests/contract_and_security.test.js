@@ -535,6 +535,7 @@ describe('DTKS API Contract Parity & Production Security Hardening Suite', () =>
       ['PATCH', '/portfolio/{slugOrId}'],
       ['DELETE', '/portfolio/{slugOrId}'],
       ['POST', '/orders/track'],
+      ['POST', '/orders/track/resend'],
       ['POST', '/orders'],
       ['GET', '/orders'],
       ['PATCH', '/orders/{id}/status'],

@@ -33,11 +33,20 @@ describe('DTKS Production Backend Audit & Security Test Suite (/api/v1)', () => 
   let refreshToken = '';
   let createdOrderId = '';
   let createdOrderRef = '';
+  let capturedEmails = [];
 
   before(async () => {
     tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'dtks-backend-audit-'));
     dbPath = path.join(tmpDir, 'dtks-test.sqlite');
     r2Dir = path.join(tmpDir, 'r2-storage');
+    const mockEmailFetch = async (_url, init) => {
+      const payload = JSON.parse(init.body);
+      capturedEmails.push(payload);
+      return new Response(JSON.stringify({ id: `re_backend_${capturedEmails.length}` }), {
+        status: 200,
+        headers: { 'Content-Type': 'application/json' },
+      });
+    };
     env = createNodeWorkerEnv({
       dbPath,
       r2Dir,
@@ -47,6 +56,8 @@ describe('DTKS Production Backend Audit & Security Test Suite (/api/v1)', () => 
         INITIAL_ADMIN_NAME: 'DTKS Test Super Admin',
         INITIAL_ADMIN_EMAIL: TEST_ADMIN_EMAIL,
         INITIAL_ADMIN_PASSWORD: TEST_ADMIN_PASSWORD,
+        RESEND_API_KEY: 're_test_backend_audit_key',
+        EMAIL_FETCH: mockEmailFetch,
       },
     });
     await resetRateLimiter(env);
@@ -468,15 +479,22 @@ describe('DTKS Production Backend Audit & Security Test Suite (/api/v1)', () => 
           'Direct-to-consumer storefront for authentic Kashmiri Pashmina shawls with catalog filters.',
         budget: '₹30,000 – ₹60,000',
         customer_name: 'Tariq Ahmad',
-        customer_email: 'tariq.ahmad@example.com',
+        customer_email: 'tariq.ahmad@dtks-test.studio',
         customer_phone: '+91 97971 23456',
         customer_city: 'Srinagar',
       },
     });
     assert.equal(orderRes.status, 201);
+    assert.equal(orderRes.json.data.trackingToken, undefined);
+    assert.equal(orderRes.json.data.tracking_token, undefined);
     createdOrderId = orderRes.json.data.order.id;
     createdOrderRef = orderRes.json.data.order.order_number;
-    const createdOrderTrackingToken = orderRes.json.data.trackingToken;
+    const customerEmailPayload = [...capturedEmails]
+      .reverse()
+      .find((m) => Array.isArray(m.to) && m.to.includes('tariq.ahmad@dtks-test.studio'));
+    assert.ok(customerEmailPayload, 'Expected tracking email dispatched to customer');
+    const tokenMatch = /#token=([a-f0-9]+)/i.exec(customerEmailPayload.text || '');
+    const createdOrderTrackingToken = tokenMatch?.[1];
     assert.ok(createdOrderTrackingToken && createdOrderTrackingToken.length >= 64);
     assert.equal(orderRes.json.data.order.status, 'Pending');
 
@@ -516,7 +534,7 @@ describe('DTKS Production Backend Audit & Security Test Suite (/api/v1)', () => 
     assert.equal(progressRes.json.data.order.status, 'InProgress');
     assert.ok(progressRes.json.data.order.statusHistory.length >= 3);
 
-    // Public tracking via POST /api/v1/orders/track reflects updated status without leaking admin_notes or PII
+    // Public tracking via POST /api/v1/orders/track reflects updated status without leaking admin_notes, statusHistory notes, or PII
     const trackRes = await apiRequest('/api/v1/orders/track', {
       method: 'POST',
       body: { token: createdOrderTrackingToken },
@@ -525,10 +543,14 @@ describe('DTKS Production Backend Audit & Security Test Suite (/api/v1)', () => 
     assert.equal(trackRes.json.data.order.status, 'InProgress');
     assert.equal(trackRes.json.data.order.admin_notes, undefined);
     assert.equal(trackRes.json.data.order.customer_email, undefined);
+    for (const h of trackRes.json.data.order.statusHistory) {
+      assert.equal(h.notes, undefined);
+      assert.equal(h.note, undefined);
+    }
 
     // Legacy GET /api/v1/orders/track returns 410 Gone
     const legacyTrackRes = await apiRequest(
-      `/api/v1/orders/track?ref=${encodeURIComponent(createdOrderRef)}&email=tariq.ahmad@example.com`
+      `/api/v1/orders/track?ref=${encodeURIComponent(createdOrderRef)}&email=tariq.ahmad@dtks-test.studio`
     );
     assert.equal(legacyTrackRes.status, 410);
   });

@@ -12,8 +12,8 @@
 | Environment | Base URL |
 | :--- | :--- |
 | **Production Custom API Domain** | `https://api.dreamtechkashmirsolutions.studio/api/v1` |
-| **Production Worker Direct URL** | `https://dtks-be.snave9401.workers.dev/api/v1` |
-| **Same-Origin Production Route** | `https://dreamtechkashmirsolutions.studio/api/v1` |
+| **Same-Origin Production Route** | `https://dreamtechkashmirsolutions.studio/api/v1` *(and `https://www.dreamtechkashmirsolutions.studio/api/v1`)* |
+| **Production `workers.dev` Subdomain** | Disabled (`workers_dev = false` in `backend/wrangler.toml`) |
 | **Local Cloudflare Worker (`wrangler dev`)** | `http://localhost:8787/api/v1` |
 | **Local Integrated Dev Server** | `http://localhost:3000/api/v1` |
 
@@ -59,8 +59,8 @@
 - `200 OK` – Request succeeded.
 - `201 Created` – Resource created (`POST /services`, `POST /packages`, `POST /portfolio`, `POST /orders`, `POST /contact`, `POST /portfolio/upload`, `POST /admin/accounts`, `POST /client/auth/register`).
 - `204 No Content` – CORS `OPTIONS` preflight succeeded.
-- `400 Bad Request` – Input validation failed (`VALIDATION_ERROR`, `INVALID_STATUS`, `INVALID_IMAGE_UPLOAD`, `INVALID_ASSET_KEY`, `INVALID_INVITE_TOKEN`, `INVITE_TOKEN_EXPIRED`, `INVITE_TOKEN_ALREADY_USED`, `INVALID_VERIFICATION_TOKEN`, `VERIFICATION_TOKEN_USED`, `VERIFICATION_TOKEN_EXPIRED`, `INVALID_RESET_TOKEN`, `RESET_TOKEN_USED`, `RESET_TOKEN_EXPIRED`).
-- `401 Unauthorized` – Missing, invalid, revoked, replayed, or expired JWT access/refresh token (`UNAUTHORIZED`, `INVALID_CREDENTIALS`, `INVALID_REFRESH_TOKEN`, `REFRESH_TOKEN_REPLAY_DETECTED`, `SESSION_REVOKED`).
+- `400 Bad Request` – Input validation failed (`VALIDATION_ERROR`, `MISSING_REFRESH_TOKEN`, `INVALID_STATUS`, `INVALID_IMAGE_UPLOAD`, `INVALID_ASSET_KEY`, `INVALID_INVITE_TOKEN`, `INVITE_TOKEN_EXPIRED`, `INVITE_TOKEN_ALREADY_USED`, `INVALID_VERIFICATION_TOKEN`, `VERIFICATION_TOKEN_USED`, `VERIFICATION_TOKEN_EXPIRED`, `INVALID_RESET_TOKEN`, `RESET_TOKEN_USED`, `RESET_TOKEN_EXPIRED`).
+- `401 Unauthorized` – Missing, invalid, revoked, replayed, mismatched-type, or expired JWT access/refresh token (`UNAUTHORIZED`, `TOKEN_EXPIRED`, `INVALID_TOKEN`, `INVALID_TOKEN_TYPE`, `INVALID_CREDENTIALS`, `INVALID_REFRESH_TOKEN`, `REFRESH_TOKEN_EXPIRED`, `REFRESH_TOKEN_REPLAY_DETECTED`, `SESSION_REVOKED`).
 - `403 Forbidden` – Plaintext HTTP blocked in production (`HTTPS_REQUIRED`), origin blocked by CORS policy (`CORS_ORIGIN_FORBIDDEN`), CSRF check failed (`CSRF_VALIDATION_FAILED`), email not verified (`EMAIL_NOT_VERIFIED`), pending admin invite (`INVITE_PENDING`), account deactivated (`ACCOUNT_DEACTIVATED`), or insufficient role permissions (`FORBIDDEN`).
 - `404 Not Found` – Resource or endpoint not found (`NOT_FOUND`, `ORDER_NOT_FOUND`, `ASSET_NOT_FOUND`).
 - `409 Conflict` – Duplicate registration or protected last active super admin (`ADMIN_EMAIL_EXISTS`, `REGISTRATION_CONFLICT`, `LAST_SUPER_ADMIN_PROTECTED`).
@@ -76,7 +76,7 @@
 ## 3. Transport Security, CORS, Cookies, CSRF & HTTP Security Headers
 
 ### HTTPS Enforcement & Security Headers
-- In `ENVIRONMENT === 'production'`, plaintext `http://` requests to `/api/v1/auth/*`, `/api/v1/client/*`, `/api/v1/admin/*`, and `/api/v1/orders/track` are rejected with `403 HTTPS_REQUIRED` (honoring `X-Forwarded-Proto`).
+- In `ENVIRONMENT === 'production'`, plaintext `http://` requests to `/api/v1/auth/*`, `/api/v1/client/*`, `/api/v1/admin/*`, and `/api/v1/orders/track*` (`/orders/track` and `/orders/track/resend`) are rejected with `403 HTTPS_REQUIRED` (honoring `X-Forwarded-Proto`).
 - API JSON responses include:
   - `X-Frame-Options: DENY`
   - `X-Content-Type-Options: nosniff`
@@ -194,6 +194,12 @@ Enforces `X-CSRF-Token` when cookie-authenticated. Revokes a single session (`re
 | `POST` | `/api/v1/client/auth/reset-password` | Public | `8 / 15m` IP + `8 / 15m` HMAC token | Atomic claim (`julianday`), enforces `12+`-char password, bumps `token_version`, revokes sessions, sends non-blocking alert |
 | `POST` | `/api/v1/client/auth/deactivate` | Client + CSRF | General | Verifies password, deactivates account, revokes sessions, bumps `token_version`, sends non-blocking alert |
 
+**Client Auth Contract & Error Codes:**
+- Guest requests to `GET /api/v1/client/auth/me` return `401 UNAUTHORIZED` (never `200 { client: null }`).
+- Cookie-mode session restoration uses `POST /api/v1/client/auth/refresh` with `dtks_client_refresh` + `X-CSRF-Token`, even when `dtks_client_access` is absent or expired.
+- Access-token failures: `401 UNAUTHORIZED`, `401 TOKEN_EXPIRED`, `401 INVALID_TOKEN`, `401 SESSION_REVOKED`, `401 INVALID_TOKEN_TYPE` (Admin JWT rejected), `403 EMAIL_NOT_VERIFIED`, `403 ACCOUNT_DEACTIVATED`.
+- Refresh-token failures: `400 MISSING_REFRESH_TOKEN`, `401 INVALID_REFRESH_TOKEN`, `401 REFRESH_TOKEN_REPLAY_DETECTED`, `401 REFRESH_TOKEN_EXPIRED`, `403 CSRF_VALIDATION_FAILED`, `403 ACCOUNT_DEACTIVATED`, `403 EMAIL_NOT_VERIFIED`.
+
 ---
 
 ### 4.1D Client-Only Data Access (`/api/v1/client`)
@@ -222,8 +228,9 @@ All endpoints require a valid **Client** session (`authenticateClient`) and stri
 
 | Method | Endpoint | Auth | Description |
 | :--- | :--- | :--- | :--- |
-| `POST` | `/api/v1/orders` | Optional Client Cookie + CSRF (Rate-limited `15 / 10m`) | Creates order; guest orders set `customer_id = NULL` (never attaching to existing client accounts); issues a 256-bit `trackingToken` (`sha256Hex` in `order_tracking_tokens`, 90d TTL) and emails `#token=` tracking link |
-| `POST` | `/api/v1/orders/track` | Public (Rate-limited IP `20/15m` + HMAC token `15/15m`) | Validates `{ "token": "..." }` against `order_tracking_tokens` and returns non-PII `status`/`statusHistory` summary (uniform `404 ORDER_NOT_FOUND` on invalid/expired/revoked tokens) |
+| `POST` | `/api/v1/orders` | Optional Client Cookie + CSRF (Rate-limited `15 / 10m`) | Creates order; guest orders set `customer_id = NULL`; stores SHA-256 hash of 256-bit tracking token (90d TTL) and returns `{ order, trackingExpiresAt, trackingEmailSent }` (**never** returning raw `trackingToken` in JSON). Customer & admin emails dispatch independently and never block committed order persistence. |
+| `POST` | `/api/v1/orders/track` | Public (Rate-limited IP `20/15m` + HMAC token `15/15m`) | Validates `{ "token": "..." }` against `order_tracking_tokens` and returns non-PII `status` & `statusHistory` (`status`, `customer_update`, `created_at` — internal admin `notes` are omitted); uniform `404 ORDER_NOT_FOUND` on invalid/expired/revoked tokens. |
+| `POST` | `/api/v1/orders/track/resend` | Public (Rate-limited IP `8/15m` + HMAC email `5/15m` + HMAC order `5/15m`, `failClosedInProd: true`) | Validates `{ orderNumber, email }` against stored orders, dispatches a `#token=` link only to stored `customer_email`, revokes prior tokens strictly after confirmed delivery, and returns uniform `200 OK` `{ requested: true }` without enumeration or provider error leakage. |
 | `GET` | `/api/v1/orders/track` | Public | Deprecated -> `410 LEGACY_TRACKING_DISABLED` |
 | `GET / PATCH / PUT / DELETE` | `/api/v1/orders*` | Admin (+ CSRF) | Full admin order workflow & RBAC (`super_admin`, `admin` for `DELETE`) |
 

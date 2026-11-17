@@ -1,14 +1,14 @@
 # DTKS_BE Production Deployment Guide (Cloudflare Workers + D1 + R2)
 
-This guide covers deploying the **DreamTech Kashmir Solutions (DTKS)** standalone backend (`dtks-be`) to production on Cloudflare Workers (`https://dtks-be.snave9401.workers.dev` and `https://api.dreamtechkashmirsolutions.studio`) and connecting the separate DTKS frontend repository (`https://github.com/shahnaveed07/DTKS.git`).
+This guide covers deploying the **DreamTech Kashmir Solutions (DTKS)** standalone backend (`dtks-be`) to production on Cloudflare Workers (`https://api.dreamtechkashmirsolutions.studio`) and connecting the separate DTKS frontend repository (`https://github.com/shahnaveed07/DTKS.git`).
 
 ---
 
 ## 1. Existing Production Cloudflare Infrastructure
 
 - **Worker Name**: `dtks-be`
-- **Worker URL**: `https://dtks-be.snave9401.workers.dev`
-- **Custom API Domain**: `https://api.dreamtechkashmirsolutions.studio`
+- **Custom API Domain & Same-Origin Routes**: `https://api.dreamtechkashmirsolutions.studio/api/v1`, `https://dreamtechkashmirsolutions.studio/api/v1`, `https://www.dreamtechkashmirsolutions.studio/api/v1`
+- **`workers.dev` Direct URL**: Disabled (`workers_dev = false` at both top-level and `[env.production]` in `backend/wrangler.toml`; local `wrangler dev` remains unaffected)
 - **D1 Database**: `dtks-production-db` (Binding: `DB`, ID: `be0ce24a-0151-412f-b308-1271bb62abba`)
 - **R2 Bucket**: `dtks-portfolio-assets` (Binding: `ASSETS_BUCKET`)
 
@@ -73,7 +73,7 @@ npx wrangler deploy --env production
 ```
 
 ### Custom Domain, HTTPS & Safe Route Configuration
-In `backend/wrangler.toml`, `name = "dtks-be"` and `workers_dev = true` ensure deployment updates the existing `dtks-be` Worker (`https://dtks-be.snave9401.workers.dev`) and preserves the custom API domain (`https://api.dreamtechkashmirsolutions.studio`) without overriding the separate frontend website hosted at `https://dreamtechkashmirsolutions.studio/`. Under `ENVIRONMENT = "production"`, development origins (`localhost`, `127.0.0.1`, `*.run.app`) are unconditionally blocked (`ALLOW_LOCAL_CORS` cannot bypass production CORS), and cleartext `http://` requests to `/auth/*`, `/client/*`, `/admin/*`, and `/orders/track` are rejected with `403 HTTPS_REQUIRED`.
+In `backend/wrangler.toml`, `name = "dtks-be"` and `workers_dev = false` (top-level and `[env.production]`) ensure production traffic is served strictly via the custom domain routes (`api.dreamtechkashmirsolutions.studio/*`, `dreamtechkashmirsolutions.studio/api/v1/*`, `www.dreamtechkashmirsolutions.studio/api/v1/*`) without exposing an unguarded `*.workers.dev` origin, while preserving the separate frontend website hosted at `https://dreamtechkashmirsolutions.studio/`. Local `wrangler dev` remains unaffected. Under `ENVIRONMENT = "production"`, development origins (`localhost`, `127.0.0.1`, `*.run.app`) are unconditionally blocked (`ALLOW_LOCAL_CORS` cannot bypass production CORS), and cleartext `http://` requests to `/auth/*`, `/client/*`, `/admin/*`, and `/orders/track*` (`/orders/track` and `/orders/track/resend`) are rejected with `403 HTTPS_REQUIRED`.
 
 ---
 
@@ -81,15 +81,15 @@ In `backend/wrangler.toml`, `name = "dtks-be"` and `workers_dev = true` ensure d
 
 ### 5.1 Liveness Check (`GET /api/v1/health`)
 ```bash
-curl -i https://dtks-be.snave9401.workers.dev/api/v1/health
 curl -i https://api.dreamtechkashmirsolutions.studio/api/v1/health
+curl -i https://dreamtechkashmirsolutions.studio/api/v1/health
 ```
 
 ### 5.2 Readiness Check (`GET /api/v1/ready`)
 Verifies D1 database binding, D1 connection, all 19 required schema tables, and R2 storage binding:
 ```bash
-curl -i https://dtks-be.snave9401.workers.dev/api/v1/ready
 curl -i https://api.dreamtechkashmirsolutions.studio/api/v1/ready
+curl -i https://dreamtechkashmirsolutions.studio/api/v1/ready
 ```
 
 ### 5.3 Public Bootstrap & Admin Login Verification

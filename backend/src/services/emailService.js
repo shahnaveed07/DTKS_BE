@@ -125,6 +125,19 @@ export async function dispatchEmail(
   };
 }
 
+async function safeDispatchEmail(env, payload) {
+  try {
+    return await dispatchEmail(env, payload);
+  } catch (err) {
+    return {
+      sent: false,
+      status: 'failed',
+      detailMessage: err?.message || 'Unexpected email dispatch error',
+      messageId: null,
+    };
+  }
+}
+
 export async function notifyOrderCreated(env, order, { trackingToken = null } = {}) {
   const adminEmail = env?.ADMIN_NOTIFICATION_EMAIL || 'contact@dreamtechkashmirsolutions.studio';
   const orderNumber = order.orderNumber || order.order_number || order.referenceId;
@@ -133,7 +146,7 @@ export async function notifyOrderCreated(env, order, { trackingToken = null } = 
     ? `Track your project status securely anytime using your private tracking link:\n${appUrl}/track-order#token=${encodeURIComponent(trackingToken)}`
     : `You can track your project status anytime from your DTKS Client Portal at ${appUrl}/client/orders.`;
 
-  await dispatchEmail(env, {
+  const customerResult = await safeDispatchEmail(env, {
     recipientEmail: order.customerEmail || order.customer_email,
     recipientType: 'customer',
     subject: `[DTKS] Website Order Received — Reference ${orderNumber}`,
@@ -158,7 +171,7 @@ export async function notifyOrderCreated(env, order, { trackingToken = null } = 
     skipExampleDomains: true,
   });
 
-  await dispatchEmail(env, {
+  const adminResult = await safeDispatchEmail(env, {
     recipientEmail: adminEmail,
     recipientType: 'admin',
     subject: `[DTKS Admin] New Website Order ${orderNumber} from ${order.customerName || order.customer_name}`,
@@ -173,18 +186,79 @@ export async function notifyOrderCreated(env, order, { trackingToken = null } = 
     relatedEntityId: order.id,
     skipExampleDomains: true,
   });
+
+  return {
+    customer: {
+      sent: Boolean(customerResult?.sent),
+      status: customerResult?.status || 'failed',
+      messageId: customerResult?.messageId || null,
+    },
+    admin: {
+      sent: Boolean(adminResult?.sent),
+      status: adminResult?.status || 'failed',
+      messageId: adminResult?.messageId || null,
+    },
+  };
+}
+
+export async function sendOrderTrackingResendEmail(
+  env,
+  {
+    orderId,
+    orderNumber,
+    customerName,
+    customerEmail,
+    serviceName,
+    packageTitle,
+    status,
+    trackingToken,
+    expiresDays = 90,
+  }
+) {
+  const appUrl = getAppBaseUrl(env);
+  const trackingUrl = `${appUrl}/track-order#token=${encodeURIComponent(trackingToken)}`;
+
+  return safeDispatchEmail(env, {
+    recipientEmail: customerEmail,
+    recipientType: 'customer',
+    subject: `[DTKS] Private Order Tracking Link — Reference ${orderNumber}`,
+    bodyText: [
+      `Hello ${customerName || 'Valued Client'},`,
+      '',
+      `You requested a new private order tracking link for your DreamTech Kashmir Solutions (DTKS) website order.`,
+      `Order Number: ${orderNumber}`,
+      `Website Category: ${serviceName || 'Website Development'}`,
+      `Selected Package: ${packageTitle || 'Custom Website Quote'}`,
+      `Current Status: ${status}`,
+      '',
+      `Open your private order tracking page using this link (valid for ${expiresDays} days):`,
+      trackingUrl,
+      '',
+      `Security Notice: Any previously issued tracking link for this order has been replaced by this new link. Keep your tracking link private and do not share it publicly.`,
+      '',
+      `If you did not request this email, you can safely ignore it.`,
+      '',
+      `Best regards,`,
+      `DreamTech Kashmir Solutions (DTKS)`,
+    ].join('\n'),
+    eventType: 'ORDER_TRACKING_LINK_RESEND',
+    relatedEntityId: orderId,
+    skipExampleDomains: false,
+  });
 }
 
 export async function notifyOrderStatusUpdated(env, order, previousStatus, { trackingToken = null } = {}) {
   const customerEmail = order?.customerEmail || order?.customer_email;
   const orderNumber = order?.orderNumber || order?.order_number || order?.referenceId;
-  if (!customerEmail || order.status === previousStatus) return;
+  if (!customerEmail || order.status === previousStatus) {
+    return { sent: false, status: 'skipped', messageId: null };
+  }
   const appUrl = getAppBaseUrl(env);
   const trackingLine = trackingToken
     ? `Track full details at ${appUrl}/track-order#token=${encodeURIComponent(trackingToken)}`
     : `View full details in your DTKS Client Portal at ${appUrl}/client/orders or via your private order tracking link.`;
 
-  await dispatchEmail(env, {
+  const res = await safeDispatchEmail(env, {
     recipientEmail: customerEmail,
     recipientType: 'customer',
     subject: `[DTKS] Order ${orderNumber} Status Updated to "${order.status}"`,
@@ -205,12 +279,18 @@ export async function notifyOrderStatusUpdated(env, order, previousStatus, { tra
     relatedEntityId: order.id,
     skipExampleDomains: true,
   });
+
+  return {
+    sent: Boolean(res?.sent),
+    status: res?.status || 'failed',
+    messageId: res?.messageId || null,
+  };
 }
 
 export async function notifyContactSubmitted(env, inquiry) {
   const adminEmail = env?.ADMIN_NOTIFICATION_EMAIL || 'contact@dreamtechkashmirsolutions.studio';
 
-  await dispatchEmail(env, {
+  const res = await safeDispatchEmail(env, {
     recipientEmail: adminEmail,
     recipientType: 'admin',
     subject: `[DTKS Admin] New Contact Message: ${inquiry.subject}`,
@@ -225,6 +305,12 @@ export async function notifyContactSubmitted(env, inquiry) {
     relatedEntityId: inquiry.id,
     skipExampleDomains: true,
   });
+
+  return {
+    sent: Boolean(res?.sent),
+    status: res?.status || 'failed',
+    messageId: res?.messageId || null,
+  };
 }
 
 export async function sendClientVerificationEmail(
